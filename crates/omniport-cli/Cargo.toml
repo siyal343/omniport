@@ -8,11 +8,23 @@ license.workspace = true
 name = "omniport"
 path = "src/main.rs"
 
+[lib]
+name = "omniport_cli"
+path = "src/lib.rs"
+
 [dependencies]
 omniport-core = { path = "../omniport-core" }
+omniport-capture = { path = "../omniport-capture" }
+omniport-net = { path = "../omniport-net" }
+omniport-script = { path = "../omniport-script" }
 omniport-proto = { path = "../omniport-proto" }
+bytes.workspace = true
 clap.workspace = true
 serde.workspace = true
 serde_json.workspace = true
+serde_yaml = "0.9"
 thiserror.workspace = true
 tokio.workspace = true
+
+[dev-dependencies]
+tempfile.workspace = true

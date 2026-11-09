@@ -62,11 +62,85 @@ enum Commands {
 
     /// Request omniportd daemon to shut down
     Stop,
+
+    /// Execute a declarative .omniport.yaml CI test scenario
+    Run {
+        /// Path to scenario YAML file (default: .omniport.yaml)
+        #[arg(default_value = ".omniport.yaml")]
+        file: std::path::PathBuf,
+
+        /// Global execution timeout in seconds
+        #[arg(long)]
+        timeout_secs: Option<u64>,
+    },
 }
 
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let cli = Cli::parse();
+
+    // The 'run' command executes standalone scenarios and does not require a running omniportd
+    if let Commands::Run { file, timeout_secs } = cli.command {
+        let mut runner = match omniport_cli::ScenarioRunner::from_file(&file) {
+            Ok(r) => r,
+            Err(e) => {
+                if cli.json {
+                    println!("{}", serde_json::json!({ "success": false, "error": e.to_string() }));
+                } else {
+                    eprintln!("Failed to load scenario '{:?}': {}", file, e);
+                }
+                std::process::exit(1);
+            }
+        };
+
+        let report = if let Some(secs) = timeout_secs {
+            let timeout = std::time::Duration::from_secs(secs);
+            match tokio::time::timeout(timeout, runner.run()).await {
+                Ok(rep) => rep,
+                Err(_) => {
+                    eprintln!("Scenario execution timed out after {} seconds.", secs);
+                    std::process::exit(1);
+                }
+            }
+        } else {
+            runner.run().await
+        };
+
+        if cli.json {
+            println!("{}", serde_json::to_string_pretty(&report)?);
+        } else {
+            println!("============================================================");
+            println!(" OmniPort CI Scenario: {}", report.scenario_name);
+            println!("============================================================");
+            for step in &report.steps {
+                let status_badge = if step.passed { "[PASS]" } else { "[FAIL]" };
+                println!(
+                    " {:<6} {:>2}. {:<12} {:<32} ({:>6.2}ms)",
+                    status_badge, step.index, step.action, step.description, step.duration_ms
+                );
+                if let Some(ref err) = step.error {
+                    println!("        Error: {}", err);
+                }
+            }
+            println!("------------------------------------------------------------");
+            println!(
+                "Result: {} ({}/{} steps passed in {:.2}ms)",
+                if report.success { "PASSED" } else { "FAILED" },
+                report.passed_steps,
+                report.total_steps,
+                report.duration_ms
+            );
+            if let Some(ref pcap) = report.pcapng_output {
+                println!("PCAPNG Capture: {}", pcap);
+            }
+            println!("============================================================");
+        }
+
+        if !report.success {
+            std::process::exit(1);
+        }
+        return Ok(());
+    }
 
     let mut client = match RpcClient::connect(&cli.server).await {
         Ok(c) => c,
@@ -196,6 +270,8 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                 println!("Shutdown signal delivered to omniportd.");
             }
         }
+
+        Commands::Run { .. } => unreachable!(),
     }
 
     Ok(())

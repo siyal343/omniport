@@ -1,0 +1,84 @@
+# OmniPort Declarative CI Test Scenario
+# Execute via: omniport run [.omniport.yaml] [--json]
+
+version: "1.0"
+name: "OmniPort HIL Loopback & Fault Verification"
+description: "Automated CI verification of virtual serial routing, framing, pin state synchronization, and fault injection."
+
+endpoints:
+  - id: 1
+    name: "hil_master"
+    type: "mock"
+    baud_rate: 115200
+
+  - id: 2
+    name: "dut_slave"
+    type: "mock"
+    baud_rate: 115200
+
+routes:
+  - id: 101
+    source: 1
+    targets: [2]
+    bidirectional: true
+    fault:
+      drop_rate: 0.0
+      bit_error_rate: 0.0
+      mean_latency_ms: 5.0
+      jitter_stddev_ms: 1.0
+
+capture:
+  enabled: true
+  output_pcapng: "target/ci_scenario.pcapng"
+
+steps:
+  - action: "sleep"
+    duration_ms: 10
+
+  # Step 1: Send Modbus RTU Read Holding Registers frame
+  - action: "send"
+    endpoint: 1
+    payload_hex: "010300000002C40B"
+
+  # Step 2: Validate frame delivery at DUT slave
+  - action: "expect"
+    endpoint: 2
+    timeout_ms: 500
+    match_hex: "010300000002C40B"
+
+  # Step 3: DUT slave replies with register data
+  - action: "send"
+    endpoint: 2
+    payload_hex: "01030400010002EBF7"
+
+  # Step 4: Validate slave reply at master
+  - action: "expect"
+    endpoint: 1
+    timeout_ms: 500
+    match_hex: "01030400010002EBF7"
+
+  # Step 5: Test ASCII control command
+  - action: "send"
+    endpoint: 1
+    payload_text: "AT+STATUS?\r\n"
+
+  - action: "expect"
+    endpoint: 2
+    timeout_ms: 500
+    match_text: "AT+STATUS?"
+
+  # Step 6: Assert and synchronize modem control pins
+  - action: "set_pins"
+    endpoint: 1
+    rts: true
+    dtr: true
+
+  - action: "assert_pins"
+    endpoint: 1
+    rts: true
+    dtr: true
+
+  # Step 7: Verify end-to-end packet delivery metrics
+  - action: "assert_metrics"
+    min_packets: 3
+    max_drops: 0
