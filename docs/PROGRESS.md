@@ -21,6 +21,6 @@ Use `/step-runner` in Antigravity 2.0 to execute each step sequentially.
 - [x] **Step 3.3:** Build the `@xyflow/react` Visual Topology Canvas and `uPlot` 60 Hz real-time telemetry strip chart.
 
 ## Phase 4: Simulation, RFC 2217 Networking & CI Test Harness
-- [ ] **Step 4.1:** Implement `omniport-script` sandboxed Lua 5.4 runtime (`mlua` with instruction fuel limits and pin/timer hooks) [FR-403, NFR-105].
+- [x] **Step 4.1:** Implement `omniport-script` sandboxed Lua 5.4 runtime (`mlua` with instruction fuel limits and pin/timer hooks) [FR-403, NFR-105].
 - [ ] **Step 4.2:** Implement `omniport-net` TCP/UDP/mTLS (`rustls`) and RFC 2217 control-pin synchronization.
 - [ ] **Step 4.3:** Build declarative `.omniport.yaml` CI scenario runner in `omniport-cli`.
