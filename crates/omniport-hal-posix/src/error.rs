@@ -29,6 +29,18 @@ pub enum HalError {
     #[error("invalid or unsupported baud rate: {0}")]
     UnsupportedBaud(u32),
 
+    #[error("failed to open cuse device (/dev/cuse): {0}")]
+    OpenCuse(#[source] std::io::Error),
+
+    #[error("CUSE initialization failed: {0}")]
+    CuseInit(String),
+
+    #[error("unsupported or invalid ioctl command: 0x{0:X}")]
+    UnsupportedIoctl(u32),
+
+    #[error("ioctl argument error: {0}")]
+    InvalidIoctlArg(String),
+
     #[error("I/O error: {0}")]
     Io(#[from] std::io::Error),
 }
