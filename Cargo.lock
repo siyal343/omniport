@@ -403,9 +403,13 @@ dependencies = [
 name = "omniport-hal-windows"
 version = "0.1.0"
 dependencies = [
+ "bytes",
  "omniport-core",
+ "proptest",
+ "tempfile",
  "thiserror",
  "tokio",
+ "windows-sys",
 ]
 
 [[package]]

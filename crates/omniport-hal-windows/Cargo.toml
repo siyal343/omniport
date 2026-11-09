@@ -8,3 +8,17 @@ license.workspace = true
 omniport-core = { path = "../omniport-core" }
 thiserror.workspace = true
 tokio.workspace = true
+bytes.workspace = true
+
+[target.'cfg(windows)'.dependencies]
+windows-sys = { version = "0.61", features = [
+    "Win32_Foundation",
+    "Win32_Storage_FileSystem",
+    "Win32_System_IO",
+    "Win32_Devices_Communication",
+    "Win32_System_Threading",
+] }
+
+[dev-dependencies]
+tempfile.workspace = true
+proptest.workspace = true

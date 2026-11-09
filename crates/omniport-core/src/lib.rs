@@ -2,6 +2,9 @@ pub mod crc;
 pub mod fault;
 pub mod framing;
 pub mod routing;
+pub mod throttler;
+
+pub use throttler::{TokenBucketThrottler, calculate_byte_rate};
 
 use bitflags::bitflags;
 use bytes::Bytes;
