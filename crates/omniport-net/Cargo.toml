@@ -8,3 +8,11 @@ license.workspace = true
 omniport-core = { path = "../omniport-core" }
 thiserror.workspace = true
 tokio.workspace = true
+bytes.workspace = true
+rustls = { version = "0.23", default-features = false, features = ["ring", "std", "tls12"] }
+tokio-rustls = { version = "0.26", default-features = false, features = ["ring", "tls12"] }
+
+[dev-dependencies]
+tempfile.workspace = true
+proptest.workspace = true
+rcgen = "0.13"
