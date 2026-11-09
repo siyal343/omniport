@@ -1,5 +1,7 @@
 pub mod crc;
+pub mod fault;
 pub mod framing;
+pub mod routing;
 
 use bitflags::bitflags;
 use bytes::Bytes;

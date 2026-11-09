@@ -5,7 +5,7 @@ Use `/step-runner` in Antigravity 2.0 to execute each step sequentially.
 ## Phase 1: Core Engine, Framing, Capture & Dissector Foundation
 - [x] **Step 1.0:** Bootstrap Cargo workspace, Antigravity 2.0 rules/skills, and baseline traits (`omniport-core`, `omniport-capture`, `omniport-dissect`).
 - [x] **Step 1.1:** Complete `StreamPacketizer` in `omniport-core` (add SLIP, Idle-Gap timer, and CRC8/16/32 validation + `proptest` fuzzing) [FR-201].
-- [ ] **Step 1.2:** Implement Lock-Free Routing Graph (`1:1`, `1:N` Splitter, `N:1` Atomic Frame Merger) and Fault Injector (Gaussian jitter, Gilbert-Elliott burst errors) in `omniport-core` [FR-202, FR-203, FR-301, FR-302].
+- [x] **Step 1.2:** Implement Lock-Free Routing Graph (`1:1`, `1:N` Splitter, `N:1` Atomic Frame Merger) and Fault Injector (Gaussian jitter, Gilbert-Elliott burst errors) in `omniport-core` [FR-202, FR-203, FR-301, FR-302].
 - [ ] **Step 1.3:** Complete `omniport-capture` PCAPNG file writer and live Wireshark `extcap` named pipe streamer [FR-401, FR-404].
 - [ ] **Step 1.4:** Build `omniport-dissect` C-struct parser (`struct __attribute__((packed))` lexer + bitfield extractor) [FR-402].
 
