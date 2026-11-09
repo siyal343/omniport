@@ -4,8 +4,25 @@ version = "0.1.0"
 edition = "2024"
 license = "Apache-2.0"
 
+[lib]
+name = "omniport_desktop_lib"
+crate-type = ["staticlib", "cdylib", "rlib"]
+
+[[bin]]
+name = "omniport-desktop"
+path = "src/main.rs"
+
 [dependencies]
+omniport-core = { path = "../../../crates/omniport-core" }
 omniport-capture = { path = "../../../crates/omniport-capture" }
 omniport-dissect = { path = "../../../crates/omniport-dissect" }
 tauri = { version = "2.2", features = [] }
 serde = { version = "1.0", features = ["derive"] }
+serde_json = "1.0"
+
+[build-dependencies]
+tauri-build = { version = "2.2", features = [] }
+
+[dev-dependencies]
+tempfile = "3.16"
+bytes = "1.9"

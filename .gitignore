@@ -1,4 +1,4 @@
-/target
+target/
 node_modules/
 /internal_docs
 dist/
@@ -6,4 +6,4 @@ dist/
 *.dat
 *.pcapng
 .DS_Store
-
+apps/omniport-desktop/src-tauri/gen/schemas/

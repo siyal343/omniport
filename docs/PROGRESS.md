@@ -16,7 +16,7 @@ Use `/step-runner` in Antigravity 2.0 to execute each step sequentially.
 - [x] **Step 2.4:** Implement `omniport-proto` gRPC schema, `omniportd` background service, and `omniport-cli` headless commands.
 
 ## Phase 3: Tauri v2 + React 19 Workbench GUI
-- [ ] **Step 3.1:** Wire Tauri v2 `fetch_viewport_rows` raw binary IPC command to `MmapCaptureEngine` and build the TypeScript `DataView` decoder [NFR-103, NFR-104].
+- [x] **Step 3.1:** Wire Tauri v2 `fetch_viewport_rows` raw binary IPC command to `MmapCaptureEngine` and build the TypeScript `DataView` decoder [NFR-103, NFR-104].
 - [ ] **Step 3.2:** Build the 60 FPS Virtualized HTML5 Canvas Hex/ASCII Monitor and synchronized DTR/RTS/DCD Control-Pin Logic Strip.
 - [ ] **Step 3.3:** Build the `@xyflow/react` Visual Topology Canvas and `uPlot` 60 Hz real-time telemetry strip chart.
 
