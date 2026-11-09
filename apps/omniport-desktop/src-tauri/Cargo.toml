@@ -1,0 +1,11 @@
+[package]
+name = "omniport-desktop"
+version = "0.1.0"
+edition = "2024"
+license = "Apache-2.0"
+
+[dependencies]
+omniport-capture = { path = "../../../crates/omniport-capture" }
+omniport-dissect = { path = "../../../crates/omniport-dissect" }
+tauri = { version = "2.2", features = [] }
+serde = { version = "1.0", features = ["derive"] }

@@ -1,0 +1,15 @@
+[package]
+name = "omniport-core"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[dependencies]
+bytes.workspace = true
+bitflags.workspace = true
+thiserror.workspace = true
+tokio.workspace = true
+serde.workspace = true
+
+[dev-dependencies]
+proptest.workspace = true

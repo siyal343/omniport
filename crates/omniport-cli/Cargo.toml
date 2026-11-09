@@ -1,0 +1,15 @@
+[package]
+name = "omniport-cli"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[[bin]]
+name = "omniport"
+path = "src/main.rs"
+
+[dependencies]
+omniport-core = { path = "../omniport-core" }
+omniport-proto = { path = "../omniport-proto" }
+clap.workspace = true
+tokio.workspace = true

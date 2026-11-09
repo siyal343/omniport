@@ -1,0 +1,16 @@
+[package]
+name = "omniportd"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[dependencies]
+omniport-core = { path = "../omniport-core" }
+omniport-capture = { path = "../omniport-capture" }
+omniport-dissect = { path = "../omniport-dissect" }
+omniport-hal-posix = { path = "../omniport-hal-posix" }
+omniport-hal-windows = { path = "../omniport-hal-windows" }
+omniport-net = { path = "../omniport-net" }
+omniport-script = { path = "../omniport-script" }
+omniport-proto = { path = "../omniport-proto" }
+tokio.workspace = true

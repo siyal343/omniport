@@ -1,0 +1,9 @@
+/target
+node_modules/
+/internal_docs
+dist/
+*.idx
+*.dat
+*.pcapng
+.DS_Store
+

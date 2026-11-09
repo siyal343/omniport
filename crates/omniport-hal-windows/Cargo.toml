@@ -1,0 +1,10 @@
+[package]
+name = "omniport-hal-windows"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[dependencies]
+omniport-core = { path = "../omniport-core" }
+thiserror.workspace = true
+tokio.workspace = true
