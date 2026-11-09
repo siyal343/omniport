@@ -13,7 +13,7 @@ Use `/step-runner` in Antigravity 2.0 to execute each step sequentially.
 - [x] **Step 2.1:** Implement `omniport-hal-posix` Tier-1 PTY manager (`/dev/ptmx`, symlink manager, `termios` poller, and Token-Bucket software baud throttler) [FR-101, FR-102].
 - [x] **Step 2.2:** Implement `omniport-hal-posix` Tier-2 Linux CUSE (`/dev/cuse`) character device for user-space `TIOCMGET`/`TIOCMSET`/`TIOCMIWAIT` pin emulation [FR-103].
 - [x] **Step 2.3:** Implement `omniport-hal-windows` Overlapped Win32 UART and `com0com` / `SetupAPI` programmatic virtual pair controller [FR-104].
-- [ ] **Step 2.4:** Implement `omniport-proto` gRPC schema, `omniportd` background service, and `omniport-cli` headless commands.
+- [x] **Step 2.4:** Implement `omniport-proto` gRPC schema, `omniportd` background service, and `omniport-cli` headless commands.
 
 ## Phase 3: Tauri v2 + React 19 Workbench GUI
 - [ ] **Step 3.1:** Wire Tauri v2 `fetch_viewport_rows` raw binary IPC command to `MmapCaptureEngine` and build the TypeScript `DataView` decoder [NFR-103, NFR-104].

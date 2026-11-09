@@ -13,4 +13,12 @@ omniport-hal-windows = { path = "../omniport-hal-windows" }
 omniport-net = { path = "../omniport-net" }
 omniport-script = { path = "../omniport-script" }
 omniport-proto = { path = "../omniport-proto" }
+thiserror.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+bytes.workspace = true
 tokio.workspace = true
+
+[dev-dependencies]
+tempfile.workspace = true
+proptest.workspace = true

@@ -1,0 +1,95 @@
+syntax = "proto3";
+
+package omniport;
+
+// Control-plane service for omniportd daemon
+service OmniPortControl {
+  rpc HealthCheck (HealthCheckRequest) returns (HealthCheckResponse);
+  rpc ListEndpoints (ListEndpointsRequest) returns (ListEndpointsResponse);
+  rpc CreateVirtualPair (CreateVirtualPairRequest) returns (CreateVirtualPairResponse);
+  rpc RemoveEndpoint (RemoveEndpointRequest) returns (RemoveEndpointResponse);
+  rpc AddRoute (AddRouteRequest) returns (AddRouteResponse);
+  rpc RemoveRoute (RemoveRouteRequest) returns (RemoveRouteResponse);
+  rpc Shutdown (ShutdownRequest) returns (ShutdownResponse);
+}
+
+message SerialConfigMsg {
+  uint32 baud_rate = 1;
+  uint32 data_bits = 2;
+  uint32 stop_bits = 3;
+  uint32 parity = 4;
+}
+
+message HealthCheckRequest {}
+
+message HealthCheckResponse {
+  string status = 1;
+  uint64 uptime_secs = 2;
+  uint32 active_endpoints = 3;
+  uint32 active_routes = 4;
+}
+
+message EndpointInfo {
+  uint32 id = 1;
+  string name = 2;
+  string port_type = 3;
+  uint32 baud_rate = 4;
+  bool is_active = 5;
+}
+
+message ListEndpointsRequest {}
+
+message ListEndpointsResponse {
+  repeated EndpointInfo endpoints = 1;
+}
+
+message CreateVirtualPairRequest {
+  string port_a = 1;
+  string port_b = 2;
+  SerialConfigMsg config = 3;
+}
+
+message CreateVirtualPairResponse {
+  uint32 pair_id = 1;
+  string port_a = 2;
+  string port_b = 3;
+  bool success = 4;
+  string message = 5;
+}
+
+message RemoveEndpointRequest {
+  uint32 id = 1;
+}
+
+message RemoveEndpointResponse {
+  bool success = 1;
+  string message = 2;
+}
+
+message AddRouteRequest {
+  uint32 source_id = 1;
+  repeated uint32 target_ids = 2;
+  bool bidirectional = 3;
+}
+
+message AddRouteResponse {
+  uint32 route_id = 1;
+  bool success = 2;
+  string message = 3;
+}
+
+message RemoveRouteRequest {
+  uint32 route_id = 1;
+}
+
+message RemoveRouteResponse {
+  bool success = 1;
+  string message = 2;
+}
+
+message ShutdownRequest {}
+
+message ShutdownResponse {
+  bool success = 1;
+  string message = 2;
+}
