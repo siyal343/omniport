@@ -381,6 +381,7 @@ dependencies = [
 name = "omniport-dissect"
 version = "0.1.0"
 dependencies = [
+ "proptest",
  "serde",
  "thiserror",
 ]
