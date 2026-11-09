@@ -346,9 +346,13 @@ name = "omniport-capture"
 version = "0.1.0"
 dependencies = [
  "bytemuck",
+ "bytes",
  "memmap2",
+ "omniport-core",
+ "proptest",
  "tempfile",
  "thiserror",
+ "tokio",
 ]
 
 [[package]]

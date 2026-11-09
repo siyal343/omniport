@@ -8,6 +8,10 @@ license.workspace = true
 bytemuck.workspace = true
 memmap2.workspace = true
 thiserror.workspace = true
+bytes.workspace = true
+tokio.workspace = true
+omniport-core = { path = "../omniport-core" }
 
 [dev-dependencies]
 tempfile.workspace = true
+proptest.workspace = true
