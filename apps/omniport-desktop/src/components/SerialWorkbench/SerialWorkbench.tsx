@@ -1,9 +1,13 @@
-import React, { useState, useCallback, useEffect } from "react";
+import React, { useState, useCallback } from "react";
 import { HexMonitorCanvas } from "../HexMonitor/HexMonitorCanvas.tsx";
 import { LogicStripCanvas } from "../LogicStrip/LogicStripCanvas.tsx";
+import { TopologyCanvas } from "../Topology/TopologyCanvas.tsx";
+import { TelemetryStripChart } from "../Telemetry/TelemetryStripChart.tsx";
 import { type ViewportRowData, extractPinStates } from "../../types/serial.ts";
-import { getTheme, type MonitorTheme } from "../../utils/theme.ts";
+import { getTheme } from "../../utils/theme.ts";
 import type { ViewportBatch } from "../../ipc/viewportDecoder.ts";
+
+export type WorkbenchViewTab = "workbench" | "monitor" | "topology" | "telemetry";
 
 export interface SerialWorkbenchProps {
   totalPackets: bigint;
@@ -21,6 +25,7 @@ export const SerialWorkbench: React.FC<SerialWorkbenchProps> = ({
   const [selectedRowIndex, setSelectedRowIndex] = useState<number | null>(null);
   const [autoScroll, setAutoScroll] = useState(false);
   const [themeMode, setThemeMode] = useState(isDark);
+  const [activeTab, setActiveTab] = useState<WorkbenchViewTab>("workbench");
 
   const theme = getTheme(themeMode);
 
@@ -46,7 +51,6 @@ export const SerialWorkbench: React.FC<SerialWorkbenchProps> = ({
     [onFetchViewport]
   );
 
-  // Selected packet information
   const selectedRow = rows.find((r) => r.rowIndex === selectedRowIndex);
   const selectedPins = selectedRow ? extractPinStates(selectedRow.pins) : null;
 
@@ -62,7 +66,7 @@ export const SerialWorkbench: React.FC<SerialWorkbenchProps> = ({
         fontFamily: '-apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif',
       }}
     >
-      {/* Top Toolbar */}
+      {/* Top Toolbar & View Tabs */}
       <div
         style={{
           display: "flex",
@@ -75,7 +79,39 @@ export const SerialWorkbench: React.FC<SerialWorkbenchProps> = ({
         }}
       >
         <div style={{ display: "flex", alignItems: "center", gap: "16px" }}>
-          <span style={{ fontWeight: 600, letterSpacing: "0.5px" }}>OMNIPORT MONITOR</span>
+          <span style={{ fontWeight: 700, letterSpacing: "0.5px", color: theme.txText }}>
+            OMNIPORT
+          </span>
+
+          {/* Navigation View Tabs */}
+          <div style={{ display: "flex", gap: 4, backgroundColor: "#0d1117", padding: 2, borderRadius: 6 }}>
+            {(
+              [
+                ["workbench", "Split Workbench"],
+                ["monitor", "Hex Monitor"],
+                ["topology", "Visual Topology"],
+                ["telemetry", "Telemetry 60Hz"],
+              ] as const
+            ).map(([tabKey, tabLabel]) => (
+              <button
+                key={tabKey}
+                onClick={() => setActiveTab(tabKey)}
+                style={{
+                  padding: "4px 8px",
+                  fontSize: "11px",
+                  fontWeight: activeTab === tabKey ? 600 : 400,
+                  borderRadius: 4,
+                  border: "none",
+                  backgroundColor: activeTab === tabKey ? theme.cardBackground : "transparent",
+                  color: activeTab === tabKey ? theme.asciiText : theme.headerText,
+                  cursor: "pointer",
+                }}
+              >
+                {tabLabel}
+              </button>
+            ))}
+          </div>
+
           <span style={{ color: theme.timestampText }}>
             Total: <strong>{totalPackets.toLocaleString()}</strong> frames
           </span>
@@ -138,30 +174,100 @@ export const SerialWorkbench: React.FC<SerialWorkbenchProps> = ({
         </div>
       </div>
 
-      {/* Main Hex/ASCII Monitor Canvas */}
-      <div style={{ flex: 1, minHeight: 0, position: "relative" }}>
-        <HexMonitorCanvas
-          totalRows={Number(totalPackets)}
-          rows={rows}
-          onViewportChange={handleViewportChange}
-          selectedRowIndex={selectedRowIndex}
-          onSelectRow={setSelectedRowIndex}
-          theme={theme}
-          autoScroll={autoScroll}
-        />
-      </div>
+      {/* Main Content Area */}
+      <div style={{ flex: 1, minHeight: 0, display: "flex", flexDirection: "column" }}>
+        {activeTab === "workbench" && (
+          <div style={{ display: "flex", flexDirection: "column", width: "100%", height: "100%" }}>
+            {/* Top Half: Hex Monitor & Logic Strip */}
+            <div style={{ flex: 1, minHeight: 0, display: "flex", flexDirection: "column" }}>
+              <div style={{ flex: 1, minHeight: 0, position: "relative" }}>
+                <HexMonitorCanvas
+                  totalRows={Number(totalPackets)}
+                  rows={rows}
+                  onViewportChange={handleViewportChange}
+                  selectedRowIndex={selectedRowIndex}
+                  onSelectRow={setSelectedRowIndex}
+                  theme={theme}
+                  autoScroll={autoScroll}
+                />
+              </div>
+              <div style={{ height: "120px", flexShrink: 0 }}>
+                <LogicStripCanvas
+                  rows={rows}
+                  startRowIndex={visibleRange.start}
+                  visibleRowCount={visibleRange.count}
+                  selectedRowIndex={selectedRowIndex}
+                  onSelectRow={setSelectedRowIndex}
+                  theme={theme}
+                  height={120}
+                />
+              </div>
+            </div>
 
-      {/* Synchronized Control-Pin Logic Strip */}
-      <div style={{ height: "140px", flexShrink: 0 }}>
-        <LogicStripCanvas
-          rows={rows}
-          startRowIndex={visibleRange.start}
-          visibleRowCount={visibleRange.count}
-          selectedRowIndex={selectedRowIndex}
-          onSelectRow={setSelectedRowIndex}
-          theme={theme}
-          height={140}
-        />
+            {/* Bottom Half: Split view between Topology and Telemetry */}
+            <div
+              style={{
+                height: "280px",
+                flexShrink: 0,
+                display: "flex",
+                borderTop: `1px solid ${theme.borderColor}`,
+              }}
+            >
+              <div style={{ flex: 1, minWidth: 0, height: "100%" }}>
+                <TopologyCanvas />
+              </div>
+              <div
+                style={{
+                  width: "480px",
+                  flexShrink: 0,
+                  height: "100%",
+                  borderLeft: `1px solid ${theme.borderColor}`,
+                }}
+              >
+                <TelemetryStripChart height={280} isDark={themeMode} />
+              </div>
+            </div>
+          </div>
+        )}
+
+        {activeTab === "monitor" && (
+          <div style={{ display: "flex", flexDirection: "column", width: "100%", height: "100%" }}>
+            <div style={{ flex: 1, minHeight: 0, position: "relative" }}>
+              <HexMonitorCanvas
+                totalRows={Number(totalPackets)}
+                rows={rows}
+                onViewportChange={handleViewportChange}
+                selectedRowIndex={selectedRowIndex}
+                onSelectRow={setSelectedRowIndex}
+                theme={theme}
+                autoScroll={autoScroll}
+              />
+            </div>
+            <div style={{ height: "140px", flexShrink: 0 }}>
+              <LogicStripCanvas
+                rows={rows}
+                startRowIndex={visibleRange.start}
+                visibleRowCount={visibleRange.count}
+                selectedRowIndex={selectedRowIndex}
+                onSelectRow={setSelectedRowIndex}
+                theme={theme}
+                height={140}
+              />
+            </div>
+          </div>
+        )}
+
+        {activeTab === "topology" && (
+          <div style={{ width: "100%", height: "100%" }}>
+            <TopologyCanvas />
+          </div>
+        )}
+
+        {activeTab === "telemetry" && (
+          <div style={{ width: "100%", height: "100%" }}>
+            <TelemetryStripChart height={600} isDark={themeMode} />
+          </div>
+        )}
       </div>
     </div>
   );

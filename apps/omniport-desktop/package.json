@@ -6,7 +6,7 @@
   "scripts": {
     "dev": "vite",
     "build": "tsc && vite build",
-    "test": "node --test src/ipc/viewportDecoder.test.js src/components/HexMonitor/hexRenderer.test.js src/components/LogicStrip/logicStripRenderer.test.js",
+    "test": "node --test src/ipc/viewportDecoder.test.js src/components/HexMonitor/hexRenderer.test.js src/components/LogicStrip/logicStripRenderer.test.js src/components/Telemetry/telemetryRingBuffer.test.js src/components/Topology/topologyGraph.test.js",
     "tauri": "tauri"
   },
   "dependencies": {
