@@ -390,7 +390,11 @@ dependencies = [
 name = "omniport-hal-posix"
 version = "0.1.0"
 dependencies = [
+ "bytes",
+ "libc",
  "omniport-core",
+ "proptest",
+ "tempfile",
  "thiserror",
  "tokio",
 ]

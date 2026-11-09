@@ -10,7 +10,7 @@ Use `/step-runner` in Antigravity 2.0 to execute each step sequentially.
 - [x] **Step 1.4:** Build `omniport-dissect` C-struct parser (`struct __attribute__((packed))` lexer + bitfield extractor) [FR-402].
 
 ## Phase 2: OS Virtual Serial Port Backends & Headless Daemon
-- [ ] **Step 2.1:** Implement `omniport-hal-posix` Tier-1 PTY manager (`/dev/ptmx`, symlink manager, `termios` poller, and Token-Bucket software baud throttler) [FR-101, FR-102].
+- [x] **Step 2.1:** Implement `omniport-hal-posix` Tier-1 PTY manager (`/dev/ptmx`, symlink manager, `termios` poller, and Token-Bucket software baud throttler) [FR-101, FR-102].
 - [ ] **Step 2.2:** Implement `omniport-hal-posix` Tier-2 Linux CUSE (`/dev/cuse`) character device for user-space `TIOCMGET`/`TIOCMSET`/`TIOCMIWAIT` pin emulation [FR-103].
 - [ ] **Step 2.3:** Implement `omniport-hal-windows` Overlapped Win32 UART and `com0com` / `SetupAPI` programmatic virtual pair controller [FR-104].
 - [ ] **Step 2.4:** Implement `omniport-proto` gRPC schema, `omniportd` background service, and `omniport-cli` headless commands.

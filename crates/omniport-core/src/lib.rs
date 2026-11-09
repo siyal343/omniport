@@ -45,7 +45,7 @@ pub struct SerialEvent {
     pub payload: Bytes,
 }
 
-#[derive(Debug, Clone, Copy)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct SerialConfig {
     pub baud_rate: u32,
     pub data_bits: u8,
