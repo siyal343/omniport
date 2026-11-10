@@ -7,11 +7,15 @@ use crate::error::{Result, ScriptError};
 use crate::fuel::{DEFAULT_CHECK_INTERVAL, DEFAULT_MAX_FUEL, FuelMeter};
 use crate::sandbox::apply_sandbox;
 
+pub const DEFAULT_MAX_MEMORY_BYTES: usize = 4 * 1024 * 1024;
+
 #[derive(Debug, Clone)]
 pub struct ScriptConfig {
     pub max_fuel: u64,
     pub fuel_check_interval: u32,
     pub initial_pins: PinState,
+    /// Maximum Lua VM heap allocation in bytes (`0` disables the limit).
+    pub max_memory_bytes: usize,
 }
 
 impl Default for ScriptConfig {
@@ -20,6 +24,7 @@ impl Default for ScriptConfig {
             max_fuel: DEFAULT_MAX_FUEL,
             fuel_check_interval: DEFAULT_CHECK_INTERVAL,
             initial_pins: PinState::empty(),
+            max_memory_bytes: DEFAULT_MAX_MEMORY_BYTES,
         }
     }
 }
@@ -28,6 +33,27 @@ pub struct ScriptEngine {
     lua: Lua,
     bridge: HostBridge,
     fuel: FuelMeter,
+    max_memory_bytes: usize,
+}
+
+fn is_memory_error(err: &mlua::Error) -> bool {
+    match err {
+        mlua::Error::MemoryError(_) => true,
+        mlua::Error::CallbackError { cause, .. }
+        | mlua::Error::WithContext { cause, .. }
+        | mlua::Error::BadArgument { cause, .. } => is_memory_error(cause),
+        _ => false,
+    }
+}
+
+fn is_fuel_error(err: &mlua::Error) -> bool {
+    match err {
+        mlua::Error::RuntimeError(msg) => msg.contains("FuelExceeded"),
+        mlua::Error::CallbackError { cause, .. }
+        | mlua::Error::WithContext { cause, .. }
+        | mlua::Error::BadArgument { cause, .. } => is_fuel_error(cause),
+        _ => err.to_string().contains("FuelExceeded"),
+    }
 }
 
 impl ScriptEngine {
@@ -46,16 +72,51 @@ impl ScriptEngine {
         let fuel = FuelMeter::new(config.max_fuel, config.fuel_check_interval);
         fuel.attach_hook(&lua)?;
 
-        Ok(Self { lua, bridge, fuel })
+        // 4. Enforce Lua VM memory ceiling (clamped to isize::MAX so mlua's allocator stays enabled).
+        let max_memory_bytes = if config.max_memory_bytes > 0 {
+            let clamped = config.max_memory_bytes.min(isize::MAX as usize);
+            lua.set_memory_limit(clamped)?;
+            let used = lua.used_memory();
+            if used > clamped {
+                return Err(ScriptError::MemoryExceeded {
+                    used,
+                    limit: clamped,
+                });
+            }
+            clamped
+        } else {
+            0
+        };
+
+        Ok(Self {
+            lua,
+            bridge,
+            fuel,
+            max_memory_bytes,
+        })
     }
 
     /// Loads and evaluates the Lua simulation script
     pub fn load_script(&mut self, code: &str) -> Result<()> {
         self.fuel.reset();
-        self.lua
-            .load(code)
-            .exec()
-            .map_err(|e| ScriptError::CompileError(e.to_string()))?;
+        if let Err(err) = self.lua.load(code).exec() {
+            let mapped = if is_memory_error(&err) {
+                ScriptError::MemoryExceeded {
+                    used: self.lua.used_memory(),
+                    limit: self.max_memory_bytes,
+                }
+            } else if is_fuel_error(&err) {
+                ScriptError::FuelExceeded {
+                    consumed: self.fuel.consumed_instructions(),
+                    limit: self.fuel.max_fuel(),
+                }
+            } else {
+                ScriptError::CompileError(err.to_string())
+            };
+            let _ = self.lua.gc_collect();
+            let _ = self.lua.gc_collect();
+            return Err(mapped);
+        }
 
         // If the script defines on_init(), call it
         let globals = self.lua.globals();
@@ -70,11 +131,16 @@ impl ScriptEngine {
 
     /// Converts an `mlua` error into the precise `ScriptError` variant.
     ///
-    /// Fuel exhaustion is raised from the instruction hook as a runtime error;
-    /// it must be surfaced as `FuelExceeded` for every callback (including
-    /// `on_init`, `on_timer` and `on_pin_change`), not just `on_rx`.
+    /// Fuel exhaustion and memory-limit exhaustion can surface either directly
+    /// from Lua (`MemoryError`) or wrapped inside Rust callbacks (`CallbackError`),
+    /// so inspect the full error chain cleanly.
     fn map_callback_error(&self, callback: &'static str, err: mlua::Error) -> ScriptError {
-        if err.to_string().contains("FuelExceeded") {
+        if is_memory_error(&err) {
+            ScriptError::MemoryExceeded {
+                used: self.lua.used_memory(),
+                limit: self.max_memory_bytes,
+            }
+        } else if is_fuel_error(&err) {
             ScriptError::FuelExceeded {
                 consumed: self.fuel.consumed_instructions(),
                 limit: self.fuel.max_fuel(),
@@ -90,8 +156,7 @@ impl ScriptEngine {
     /// Drains the output queue after a successful callback.
     ///
     /// If the callback failed part-way through, any bytes it already queued are
-    /// discarded: otherwise a half-written frame would leak into the next
-    /// dispatch (stale/partial writes on the wire).
+    /// discarded and unreachable Lua memory is reclaimed before the next call.
     fn finish_callback(
         &mut self,
         result: mlua::Result<()>,
@@ -101,7 +166,10 @@ impl ScriptEngine {
             Ok(()) => Ok(self.bridge.drain_outbound()),
             Err(e) => {
                 self.bridge.clear_outbound();
-                Err(self.map_callback_error(callback, e))
+                let mapped = self.map_callback_error(callback, e);
+                let _ = self.lua.gc_collect();
+                let _ = self.lua.gc_collect();
+                Err(mapped)
             }
         }
     }
@@ -112,8 +180,12 @@ impl ScriptEngine {
         if let Ok(on_rx) = globals.get::<Function>("on_rx") {
             self.fuel.reset();
 
-            let lua_payload = self.lua.create_string(payload)?;
-            let lua_pins = pin_state_to_lua(&self.lua, pins)?;
+            let lua_payload = self
+                .lua
+                .create_string(payload)
+                .map_err(|e| self.map_callback_error("on_rx", e))?;
+            let lua_pins = pin_state_to_lua(&self.lua, pins)
+                .map_err(|e| self.map_callback_error("on_rx", e))?;
 
             let result = on_rx.call::<()>((lua_payload, lua_pins));
             self.finish_callback(result, "on_rx")
@@ -127,7 +199,8 @@ impl ScriptEngine {
         let globals = self.lua.globals();
         if let Ok(on_pin_change) = globals.get::<Function>("on_pin_change") {
             self.fuel.reset();
-            let lua_pins = pin_state_to_lua(&self.lua, new_pins)?;
+            let lua_pins = pin_state_to_lua(&self.lua, new_pins)
+                .map_err(|e| self.map_callback_error("on_pin_change", e))?;
 
             let result = on_pin_change.call::<()>(lua_pins);
             self.finish_callback(result, "on_pin_change")
@@ -162,6 +235,14 @@ impl ScriptEngine {
 
     pub fn consumed_fuel(&self) -> u64 {
         self.fuel.consumed_instructions()
+    }
+
+    pub fn used_memory(&self) -> usize {
+        self.lua.used_memory()
+    }
+
+    pub fn max_memory_bytes(&self) -> usize {
+        self.max_memory_bytes
     }
 }
 
@@ -307,6 +388,125 @@ mod tests {
         assert!(
             matches!(err, ScriptError::CallbackError { ref callback, .. } if callback == "on_rx"),
             "unexpected error: {err:?}"
+        );
+    }
+
+    #[test]
+    fn test_string_rep_memory_bomb_is_stopped_and_engine_recovers() {
+        let config = ScriptConfig {
+            max_memory_bytes: 512 * 1024,
+            ..Default::default()
+        };
+        let mut engine = ScriptEngine::new(config).unwrap();
+        engine
+            .load_script(
+                r#"
+                function on_rx(payload, pins)
+                    if payload == "bomb" then
+                        serial.send("PARTIAL")
+                        local huge = string.rep("A", 2 * 1024 * 1024)
+                        serial.send(huge)
+                        return
+                    end
+                    serial.send("ALIVE:" .. payload)
+                end
+                "#,
+            )
+            .unwrap();
+
+        let err = engine.dispatch_rx(b"bomb", PinState::empty()).unwrap_err();
+        assert!(
+            matches!(err, ScriptError::MemoryExceeded { limit: 524_288, .. }),
+            "expected MemoryExceeded for string.rep OOM, got {err:?}"
+        );
+
+        // Next valid dispatch must run cleanly without stale outbound leakage or broken VM.
+        let out = engine.dispatch_rx(b"ok", PinState::empty()).unwrap();
+        assert_eq!(out.len(), 1);
+        assert_eq!(&out[0][..], b"ALIVE:ok");
+    }
+
+    #[test]
+    fn test_table_concat_memory_bomb_is_stopped() {
+        let config = ScriptConfig {
+            max_memory_bytes: 512 * 1024,
+            ..Default::default()
+        };
+        let mut engine = ScriptEngine::new(config).unwrap();
+        engine
+            .load_script(
+                r#"
+                function on_rx(payload, pins)
+                    local chunk = string.rep("X", 64 * 1024)
+                    local t = {}
+                    for i = 1, 16 do
+                        t[i] = chunk
+                    end
+                    return table.concat(t)
+                end
+                "#,
+            )
+            .unwrap();
+
+        let err = engine.dispatch_rx(b"go", PinState::empty()).unwrap_err();
+        assert!(
+            matches!(err, ScriptError::MemoryExceeded { .. }),
+            "expected MemoryExceeded for table.concat OOM, got {err:?}"
+        );
+    }
+
+    #[test]
+    fn test_top_level_script_allocation_respects_memory_limit() {
+        let config = ScriptConfig {
+            max_memory_bytes: 256 * 1024,
+            ..Default::default()
+        };
+        let mut engine = ScriptEngine::new(config).unwrap();
+        let err = engine
+            .load_script("local huge = string.rep('Z', 1024 * 1024)")
+            .unwrap_err();
+        assert!(
+            matches!(err, ScriptError::MemoryExceeded { .. }),
+            "expected top-level MemoryExceeded, got {err:?}"
+        );
+    }
+
+    #[test]
+    fn test_oversized_serial_send_string_and_table_are_rejected_safely() {
+        let config = ScriptConfig {
+            max_fuel: 50_000_000,
+            max_memory_bytes: 32 * 1024 * 1024,
+            ..Default::default()
+        };
+        let mut engine = ScriptEngine::new(config).unwrap();
+        engine
+            .load_script(
+                r#"
+                function on_rx(payload, pins)
+                    if payload == "str" then
+                        serial.send(string.rep("A", 1024 * 1024 + 1))
+                    elseif payload == "tbl" then
+                        local t = {}
+                        for i = 1, (1024 * 1024 + 1) do
+                            t[i] = 0x41
+                        end
+                        serial.send(t)
+                    end
+                end
+                "#,
+            )
+            .unwrap();
+
+        let err_str = engine.dispatch_rx(b"str", PinState::empty()).unwrap_err();
+        assert!(
+            matches!(err_str, ScriptError::MemoryExceeded { .. }),
+            "expected MemoryExceeded for oversized serial.send string, got {err_str:?}"
+        );
+
+        let err_tbl = engine.dispatch_rx(b"tbl", PinState::empty()).unwrap_err();
+        assert!(
+            matches!(err_tbl, ScriptError::MemoryExceeded { .. }),
+            "expected MemoryExceeded for oversized serial.send table, got {err_tbl:?}"
         );
     }
 }

@@ -4,6 +4,11 @@ use omniport_core::PinState;
 use std::sync::atomic::{AtomicU8, Ordering};
 use std::sync::{Arc, Mutex};
 
+/// Hard per-frame cap on `serial.send(...)` payloads to bound Rust-side allocations
+/// (especially sparse or giant Lua tables whose `raw_len()` bypasses `mlua`'s heap limit).
+pub const MAX_SERIAL_SEND_BYTES: usize = 1024 * 1024;
+const MAX_OUTBOUND_QUEUE_BYTES: usize = 16 * 1024 * 1024;
+
 #[derive(Clone, Default)]
 pub struct HostBridge {
     outbound_queue: Arc<Mutex<Vec<Bytes>>>,
@@ -59,9 +64,23 @@ impl HostBridge {
         let queue = self.outbound_queue.clone();
         let send_fn = lua.create_function(move |_lua, val: Value| {
             let bytes = match val {
-                Value::String(s) => Bytes::copy_from_slice(s.as_bytes().as_ref()),
+                Value::String(s) => {
+                    let slice = s.as_bytes();
+                    if slice.len() > MAX_SERIAL_SEND_BYTES {
+                        return Err(mlua::Error::MemoryError(format!(
+                            "serial.send payload ({} bytes) exceeds max frame size ({MAX_SERIAL_SEND_BYTES} bytes)",
+                            slice.len()
+                        )));
+                    }
+                    Bytes::copy_from_slice(slice.as_ref())
+                }
                 Value::Table(t) => {
                     let len = t.raw_len();
+                    if len > MAX_SERIAL_SEND_BYTES {
+                        return Err(mlua::Error::MemoryError(format!(
+                            "serial.send table length ({len} bytes) exceeds max frame size ({MAX_SERIAL_SEND_BYTES} bytes)"
+                        )));
+                    }
                     let mut buf = Vec::with_capacity(len);
                     for i in 1..=len {
                         let b: u8 = t.get(i)?;
@@ -75,7 +94,14 @@ impl HostBridge {
                     ));
                 }
             };
-            queue.lock().unwrap().push(bytes);
+            let mut q = queue.lock().unwrap_or_else(|e| e.into_inner());
+            let queued_bytes: usize = q.iter().map(|b| b.len()).sum();
+            if queued_bytes.saturating_add(bytes.len()) > MAX_OUTBOUND_QUEUE_BYTES {
+                return Err(mlua::Error::MemoryError(format!(
+                    "serial.send outbound queue limit ({MAX_OUTBOUND_QUEUE_BYTES} bytes) exceeded"
+                )));
+            }
+            q.push(bytes);
             Ok(())
         })?;
         serial.set("send", send_fn)?;
@@ -132,7 +158,7 @@ impl HostBridge {
         // 4. serial.log(message)
         let logs = self.log_messages.clone();
         let log_fn = lua.create_function(move |_lua, msg: String| {
-            logs.lock().unwrap().push(msg);
+            logs.lock().unwrap_or_else(|e| e.into_inner()).push(msg);
             Ok(())
         })?;
         serial.set("log", log_fn)?;

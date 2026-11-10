@@ -17,7 +17,6 @@ enum PtyIo {
     #[cfg(unix)]
     Unix {
         async_fd: tokio::io::unix::AsyncFd<std::os::fd::OwnedFd>,
-        _slave_fd: Option<std::os::fd::OwnedFd>,
     },
     #[cfg(not(unix))]
     Mock {
@@ -30,7 +29,7 @@ impl PtyIo {
     async fn read(&mut self, buf: &mut [u8]) -> std::io::Result<usize> {
         match self {
             #[cfg(unix)]
-            PtyIo::Unix { async_fd, .. } => loop {
+            PtyIo::Unix { async_fd } => loop {
                 let mut guard = async_fd.readable().await?;
                 match guard.try_io(|inner| {
                     let res = unsafe {
@@ -42,6 +41,11 @@ impl PtyIo {
                     };
                     if res < 0 {
                         Err(std::io::Error::last_os_error())
+                    } else if res == 0 {
+                        Err(std::io::Error::new(
+                            std::io::ErrorKind::UnexpectedEof,
+                            "PTY slave disconnected",
+                        ))
                     } else {
                         Ok(res as usize)
                     }
@@ -69,7 +73,7 @@ impl PtyIo {
     async fn write_all(&mut self, #[allow(unused_mut)] mut buf: &[u8]) -> std::io::Result<()> {
         match self {
             #[cfg(unix)]
-            PtyIo::Unix { async_fd, .. } => {
+            PtyIo::Unix { async_fd } => {
                 while !buf.is_empty() {
                     let mut guard = async_fd.writable().await?;
                     match guard.try_io(|inner| {
@@ -129,9 +133,9 @@ impl PtyEndpoint {
 
         #[cfg(unix)]
         {
-            let (master_fd, slave_path, slave_fd) = open_unix_pty()?;
-            let poller = TermiosPoller::new(slave_fd.as_ref().map(|f| f.as_raw_fd()), config);
-            let async_fd = tokio::io::unix::AsyncFd::new(master_fd).map_err(|e| HalError::Io(e))?;
+            let (master_fd, slave_path) = open_unix_pty()?;
+            let poller = TermiosPoller::new(Some(master_fd.as_raw_fd()), config);
+            let async_fd = tokio::io::unix::AsyncFd::new(master_fd).map_err(HalError::Io)?;
 
             let symlink = if let Some(link) = symlink_path {
                 Some(SymlinkManager::create(&slave_path, link)?)
@@ -149,10 +153,7 @@ impl PtyEndpoint {
                 poller,
                 pins: PinState::empty(),
                 config,
-                io: PtyIo::Unix {
-                    async_fd,
-                    _slave_fd: slave_fd,
-                },
+                io: PtyIo::Unix { async_fd },
             })
         }
 
@@ -288,61 +289,62 @@ impl AsyncEndpoint for PtyEndpoint {
     }
 }
 
+/// Linux/POSIX.1-2024 `ptsname_r` returns a positive errno directly without setting `errno`,
+/// whereas BSDs return `-1` and set `errno`.
+#[cfg(any(unix, test))]
+fn ptsname_error(res: i32, last_errno: std::io::Error) -> std::io::Error {
+    if res > 0 {
+        std::io::Error::from_raw_os_error(res)
+    } else {
+        last_errno
+    }
+}
+
 #[cfg(unix)]
-fn open_unix_pty() -> Result<(std::os::fd::OwnedFd, PathBuf, Option<std::os::fd::OwnedFd>)> {
+fn open_unix_pty() -> Result<(std::os::fd::OwnedFd, PathBuf)> {
     use std::os::fd::FromRawFd;
 
     let master_fd = unsafe { libc::posix_openpt(libc::O_RDWR | libc::O_NOCTTY | libc::O_NONBLOCK) };
     if master_fd < 0 {
         return Err(HalError::OpenPt(std::io::Error::last_os_error()));
     }
+    let owned_master = unsafe { std::os::fd::OwnedFd::from_raw_fd(master_fd) };
 
-    if unsafe { libc::grantpt(master_fd) } != 0 {
-        let err = std::io::Error::last_os_error();
-        unsafe { libc::close(master_fd) };
-        return Err(HalError::GrantPt(err));
+    if unsafe { libc::grantpt(owned_master.as_raw_fd()) } != 0 {
+        return Err(HalError::GrantPt(std::io::Error::last_os_error()));
     }
 
-    if unsafe { libc::unlockpt(master_fd) } != 0 {
-        let err = std::io::Error::last_os_error();
-        unsafe { libc::close(master_fd) };
-        return Err(HalError::UnlockPt(err));
+    if unsafe { libc::unlockpt(owned_master.as_raw_fd()) } != 0 {
+        return Err(HalError::UnlockPt(std::io::Error::last_os_error()));
     }
 
     let mut buf = [0u8; 256];
-    let res =
-        unsafe { libc::ptsname_r(master_fd, buf.as_mut_ptr() as *mut libc::c_char, buf.len()) };
+    let res = unsafe {
+        libc::ptsname_r(
+            owned_master.as_raw_fd(),
+            buf.as_mut_ptr() as *mut libc::c_char,
+            buf.len(),
+        )
+    };
     if res != 0 {
-        let err = std::io::Error::last_os_error();
-        unsafe { libc::close(master_fd) };
+        let err = ptsname_error(res, std::io::Error::last_os_error());
         return Err(HalError::PtsName(err.to_string()));
     }
     let len = buf.iter().position(|&c| c == 0).unwrap_or(buf.len());
     let pts_str = std::str::from_utf8(&buf[..len]).map_err(|e| HalError::PtsName(e.to_string()))?;
     let slave_path = PathBuf::from(pts_str);
 
-    // Open slave in non-blocking mode to configure raw mode and for termios polling
-    let c_path = std::ffi::CString::new(pts_str).map_err(|e| HalError::PtsName(e.to_string()))?;
-    let slave_fd = unsafe {
-        libc::open(
-            c_path.as_ptr(),
-            libc::O_RDWR | libc::O_NOCTTY | libc::O_NONBLOCK,
-        )
-    };
-    let slave_owned = if slave_fd >= 0 {
-        let _ = crate::termios::set_raw_mode(slave_fd);
-        Some(unsafe { std::os::fd::OwnedFd::from_raw_fd(slave_fd) })
-    } else {
-        None
-    };
+    // Do not open the slave fd here: keeping it open prevents EIO when the client closes,
+    // and opening+closing before client connect trips Linux TTY_OTHER_CLOSED on master.
+    let _ = crate::termios::set_raw_mode(owned_master.as_raw_fd());
 
-    let owned_master = unsafe { std::os::fd::OwnedFd::from_raw_fd(master_fd) };
-    Ok((owned_master, slave_path, slave_owned))
+    Ok((owned_master, slave_path))
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[cfg(not(unix))]
     use tokio::io::{AsyncReadExt, AsyncWriteExt};
 
     #[tokio::test]
@@ -399,12 +401,12 @@ mod tests {
             let recv_event = pty.recv().await.expect("recv event");
             assert_eq!(recv_event.source_id, 42);
             assert_eq!(&recv_event.payload[..], b"OmniPort-v1.0\r\n");
-
-            // Test 3: Pin state
-            pty.set_pins(PinState::DTR | PinState::RTS)
-                .expect("set pins");
-            assert_eq!(pty.pins, PinState::DTR | PinState::RTS);
         }
+
+        // Test 3: Pin state
+        pty.set_pins(PinState::DTR | PinState::RTS)
+            .expect("set pins");
+        assert_eq!(pty.pins, PinState::DTR | PinState::RTS);
 
         // Test 4: Symlink cleanup on drop
         drop(pty);
@@ -413,6 +415,67 @@ mod tests {
             "symlink entry for {} survived endpoint drop",
             symlink_path.display()
         );
+    }
+
+    #[test]
+    fn test_ptsname_error_uses_direct_return_code_before_errno() {
+        // Linux/POSIX ptsname_r returns positive errno without updating errno.
+        let linux_err = ptsname_error(22, std::io::Error::from_raw_os_error(0));
+        assert_eq!(linux_err.raw_os_error(), Some(22));
+
+        // BSD ptsname_r returns -1 and populates errno.
+        let bsd_err = ptsname_error(-1, std::io::Error::from_raw_os_error(9));
+        assert_eq!(bsd_err.raw_os_error(), Some(9));
+    }
+
+    #[tokio::test]
+    async fn test_pty_endpoint_detects_slave_disconnect() {
+        let config = SerialConfig::default();
+        let mut pty = PtyEndpoint::open(7, "ttyDisc", config, None).expect("open pty");
+
+        #[cfg(not(unix))]
+        {
+            let mut slave = pty.take_mock_slave().expect("take mock slave");
+            slave.write_all(b"PING\n").await.expect("write from slave");
+            let evt = pty.recv().await.expect("recv before close");
+            assert_eq!(&evt.payload[..], b"PING\n");
+
+            drop(slave);
+            let err = pty
+                .recv()
+                .await
+                .expect_err("closing sole slave must report disconnect");
+            assert_eq!(err.kind(), std::io::ErrorKind::UnexpectedEof);
+        }
+
+        #[cfg(unix)]
+        {
+            use std::io::Write;
+            let mut slave = std::fs::OpenOptions::new()
+                .read(true)
+                .write(true)
+                .open(pty.slave_path())
+                .expect("open PTY slave node");
+            slave.write_all(b"PING\n").expect("write from slave");
+            slave.flush().expect("flush");
+
+            let evt = tokio::time::timeout(std::time::Duration::from_secs(2), pty.recv())
+                .await
+                .expect("recv timed out")
+                .expect("recv before slave close");
+            assert_eq!(&evt.payload[..], b"PING\n");
+
+            drop(slave);
+            let err = tokio::time::timeout(std::time::Duration::from_secs(2), pty.recv())
+                .await
+                .expect("recv hung after slave close — master did not see EIO/HUP")
+                .expect_err("closing sole slave must surface EIO or EOF on master");
+            assert!(
+                err.raw_os_error() == Some(libc::EIO)
+                    || err.kind() == std::io::ErrorKind::UnexpectedEof,
+                "unexpected error after PTY slave close: {err:?}"
+            );
+        }
     }
 
     #[tokio::test]

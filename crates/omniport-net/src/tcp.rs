@@ -11,7 +11,7 @@ use tokio::net::{TcpListener, TcpStream};
 use tokio::sync::mpsc;
 
 use crate::rfc2217::{
-    COM_PORT_OPTION, DO, Rfc2217Codec, Rfc2217Command, WILL, config_to_rfc2217_commands,
+    Rfc2217Codec, Rfc2217Command, Rfc2217Negotiator, config_to_rfc2217_commands,
     modem_state_to_pin_state, pin_state_to_control,
 };
 
@@ -76,12 +76,9 @@ impl TcpEndpoint {
         });
 
         // Initial RFC 2217 option negotiation if enabled
+        let mut negotiator = Rfc2217Negotiator::new();
         if rfc2217_enabled {
-            let init_negotiations = [
-                Rfc2217Codec::encode_option(DO, COM_PORT_OPTION),
-                Rfc2217Codec::encode_option(WILL, COM_PORT_OPTION),
-            ];
-            for neg in init_negotiations {
+            for neg in negotiator.initiate_com_port() {
                 let _ = tcp_tx.try_send(neg);
             }
 
@@ -94,6 +91,7 @@ impl TcpEndpoint {
 
         // Background read loop
         let pins_clone = pins.clone();
+        let reply_tx = tcp_tx.clone();
         let source_id = id;
 
         tokio::spawn(async move {
@@ -116,7 +114,13 @@ impl TcpEndpoint {
                             .as_nanos() as u64;
 
                         if rfc2217_enabled {
-                            let (clean_data, commands, _) = codec.decode_chunk(&buf[..n]);
+                            let (clean_data, commands, negotiations) = codec.decode_chunk(&buf[..n]);
+
+                            for (verb, option) in negotiations {
+                                if let Some(reply) = negotiator.handle_negotiation(verb, option) {
+                                    let _ = reply_tx.try_send(reply);
+                                }
+                            }
 
                             // Handle RFC 2217 in-band control commands
                             for cmd in commands {
@@ -352,5 +356,116 @@ mod tests {
         assert!(pin_evt.pins.contains(PinState::CTS));
 
         server_task.await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn test_tcp_rfc2217_replies_to_peer_negotiations_without_looping() {
+        use crate::rfc2217::{DO, DONT, IAC, TRANSMIT_BINARY, WILL, WONT};
+
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+
+        let peer_task = tokio::spawn(async move {
+            let (mut stream, _) = listener.accept().await.unwrap();
+
+            // Drain initial handshake emitted by client (DO 44, WILL 44 + serial config).
+            let mut init_buf = [0u8; 256];
+            let init_len = stream.read(&mut init_buf).await.unwrap();
+            assert!(init_len >= 6);
+
+            // Ask client for TRANSMIT_BINARY (supported -> expects WILL 0) and option 99
+            // (unsupported -> expects WONT 99 + DONT 99), plus IAC WILL 44 (already WantYes -> silent).
+            stream
+                .write_all(&[
+                    IAC,
+                    WILL,
+                    crate::rfc2217::COM_PORT_OPTION,
+                    IAC,
+                    DO,
+                    TRANSMIT_BINARY,
+                    IAC,
+                    DO,
+                    99,
+                    IAC,
+                    WILL,
+                    99,
+                ])
+                .await
+                .unwrap();
+
+            let mut reply_buf = Vec::new();
+            let deadline = tokio::time::Instant::now() + tokio::time::Duration::from_millis(120);
+            loop {
+                let rem = deadline.saturating_duration_since(tokio::time::Instant::now());
+                if rem.is_zero() {
+                    break;
+                }
+                let mut tmp = [0u8; 64];
+                match tokio::time::timeout(rem, stream.read(&mut tmp)).await {
+                    Ok(Ok(n)) if n > 0 => reply_buf.extend_from_slice(&tmp[..n]),
+                    _ => break,
+                }
+            }
+            reply_buf
+        });
+
+        let mut client =
+            TcpEndpoint::connect_client(21, "RfcNegClient", addr, SerialConfig::default(), true)
+                .await
+                .unwrap();
+
+        let replies = peer_task.await.unwrap();
+        let mut codec = Rfc2217Codec::new();
+        let (_, _, negs) = codec.decode_chunk(&replies);
+
+        assert_eq!(
+            negs,
+            vec![(WILL, TRANSMIT_BINARY), (WONT, 99), (DONT, 99),],
+            "expected exact RFC 1143 replies with zero extra echo/storm: {negs:?}"
+        );
+
+        // Peer dropped connection -> client.recv() must return EOF cleanly.
+        let eof = tokio::time::timeout(std::time::Duration::from_secs(1), client.recv())
+            .await
+            .expect("recv must return EOF");
+        assert!(eof.is_err());
+    }
+
+    #[tokio::test]
+    async fn test_tcp_rfc2217_peer_to_peer_converges_and_exchanges_data() {
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+
+        let server_task = tokio::spawn(async move {
+            let (stream, _) = listener.accept().await.unwrap();
+            TcpEndpoint::from_stream(30, "RfcServer", stream, SerialConfig::default(), true)
+                .unwrap()
+        });
+
+        let mut client =
+            TcpEndpoint::connect_client(31, "RfcClient", addr, SerialConfig::default(), true)
+                .await
+                .unwrap();
+        let mut server = server_task.await.unwrap();
+
+        // Give the two RFC 2217 tasks a brief moment to complete option negotiation.
+        tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+
+        client
+            .send(SerialEvent {
+                timestamp_ns: 1,
+                source_id: 31,
+                flags: FrameFlags::empty(),
+                pins: PinState::empty(),
+                payload: Bytes::from_static(b"HELLO_2217"),
+            })
+            .await
+            .unwrap();
+
+        let evt = tokio::time::timeout(std::time::Duration::from_secs(1), server.recv())
+            .await
+            .expect("server must receive payload")
+            .unwrap();
+        assert_eq!(&evt.payload[..], b"HELLO_2217");
     }
 }

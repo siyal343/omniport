@@ -1,6 +1,9 @@
-use omniport_core::{AsyncEndpoint, FrameFlags, PinState, SerialConfig, SerialEvent};
+use omniport_core::SerialConfig;
+#[cfg(not(unix))]
+use omniport_core::{AsyncEndpoint, FrameFlags, PinState, SerialEvent};
 use omniport_hal_posix::{PtyEndpoint, SymlinkManager, TokenBucketThrottler, calculate_byte_rate};
 use proptest::prelude::*;
+#[cfg(not(unix))]
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 
 proptest! {
@@ -94,6 +97,7 @@ async fn test_pty_endpoint_stream_roundtrip_proptest() {
         parity: 0,
     };
 
+    #[cfg_attr(unix, allow(unused_mut))]
     let mut pty = PtyEndpoint::open(10, "test_vport", cfg, None).expect("open pty");
 
     #[cfg(not(unix))]

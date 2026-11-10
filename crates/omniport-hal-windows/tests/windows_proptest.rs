@@ -24,7 +24,7 @@ proptest! {
     fn prop_virtual_pair_isolation_and_raii(
         start_base in 50u32..2000u32,
     ) {
-        let controller = Com0ComController::new();
+        let controller = Com0ComController::new_mock();
         let (port_a, port_b) = controller.find_free_pair_names(start_base).unwrap();
 
         prop_assert_ne!(&port_a, &port_b);

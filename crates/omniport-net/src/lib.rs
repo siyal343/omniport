@@ -10,7 +10,7 @@ pub mod tls;
 pub mod udp;
 
 pub use error::{NetError, Result};
-pub use rfc2217::{Rfc2217Codec, Rfc2217Command};
+pub use rfc2217::{Rfc2217Codec, Rfc2217Command, Rfc2217Negotiator};
 pub use tcp::TcpEndpoint;
 pub use tls::TlsEndpoint;
 pub use udp::UdpEndpoint;

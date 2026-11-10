@@ -9,6 +9,8 @@ pub const WILL: u8 = 251;
 pub const SB: u8 = 250;
 pub const SE: u8 = 240;
 
+pub const TRANSMIT_BINARY: u8 = 0;
+pub const SUPPRESS_GO_AHEAD: u8 = 3;
 pub const COM_PORT_OPTION: u8 = 44;
 
 /// Upper bound for a single RFC 2217 subnegotiation payload. A peer that opens
@@ -290,6 +292,140 @@ fn parse_subneg(buf: &[u8]) -> Option<Rfc2217Command> {
     }
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+enum TelnetSideState {
+    #[default]
+    No,
+    Yes,
+    WantYes,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+struct OptionStates {
+    us: TelnetSideState,
+    him: TelnetSideState,
+}
+
+/// RFC 1143 Q-method Telnet option negotiation state machine for RFC 2217 peers.
+///
+/// Tracks independent local (`us`: `WILL`/`WONT`) and remote (`him`: `DO`/`DONT`)
+/// states per option byte so option negotiation converges without reply loops.
+#[derive(Debug, Clone)]
+pub struct Rfc2217Negotiator {
+    options: [OptionStates; 256],
+}
+
+impl Default for Rfc2217Negotiator {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+impl Rfc2217Negotiator {
+    pub fn new() -> Self {
+        Self {
+            options: [OptionStates::default(); 256],
+        }
+    }
+
+    /// Returns `true` for Telnet options this endpoint supports.
+    pub fn is_supported_option(option: u8) -> bool {
+        matches!(
+            option,
+            TRANSMIT_BINARY | SUPPRESS_GO_AHEAD | COM_PORT_OPTION
+        )
+    }
+
+    /// Returns `(local_enabled, remote_enabled)` for `option`.
+    pub fn is_option_enabled(&self, option: u8) -> (bool, bool) {
+        let entry = self.options[option as usize];
+        (
+            entry.us == TelnetSideState::Yes,
+            entry.him == TelnetSideState::Yes,
+        )
+    }
+
+    /// Initiates bilateral RFC 2217 `COM_PORT_OPTION` negotiation if not already started.
+    pub fn initiate_com_port(&mut self) -> Vec<Bytes> {
+        let mut out = Vec::with_capacity(2);
+        let entry = &mut self.options[COM_PORT_OPTION as usize];
+
+        if entry.him == TelnetSideState::No {
+            entry.him = TelnetSideState::WantYes;
+            out.push(Rfc2217Codec::encode_option(DO, COM_PORT_OPTION));
+        }
+        if entry.us == TelnetSideState::No {
+            entry.us = TelnetSideState::WantYes;
+            out.push(Rfc2217Codec::encode_option(WILL, COM_PORT_OPTION));
+        }
+
+        out
+    }
+
+    /// Processes an incoming `(verb, option)` Telnet negotiation pair and returns
+    /// the RFC 1143 response frame, or `None` if no reply should be sent.
+    pub fn handle_negotiation(&mut self, verb: u8, option: u8) -> Option<Bytes> {
+        let supported = Self::is_supported_option(option);
+        let entry = &mut self.options[option as usize];
+
+        match verb {
+            WILL => match entry.him {
+                TelnetSideState::No => {
+                    if supported {
+                        entry.him = TelnetSideState::Yes;
+                        Some(Rfc2217Codec::encode_option(DO, option))
+                    } else {
+                        Some(Rfc2217Codec::encode_option(DONT, option))
+                    }
+                }
+                TelnetSideState::Yes => None,
+                TelnetSideState::WantYes => {
+                    entry.him = TelnetSideState::Yes;
+                    None
+                }
+            },
+            WONT => match entry.him {
+                TelnetSideState::No => None,
+                TelnetSideState::Yes => {
+                    entry.him = TelnetSideState::No;
+                    Some(Rfc2217Codec::encode_option(DONT, option))
+                }
+                TelnetSideState::WantYes => {
+                    entry.him = TelnetSideState::No;
+                    None
+                }
+            },
+            DO => match entry.us {
+                TelnetSideState::No => {
+                    if supported {
+                        entry.us = TelnetSideState::Yes;
+                        Some(Rfc2217Codec::encode_option(WILL, option))
+                    } else {
+                        Some(Rfc2217Codec::encode_option(WONT, option))
+                    }
+                }
+                TelnetSideState::Yes => None,
+                TelnetSideState::WantYes => {
+                    entry.us = TelnetSideState::Yes;
+                    None
+                }
+            },
+            DONT => match entry.us {
+                TelnetSideState::No => None,
+                TelnetSideState::Yes => {
+                    entry.us = TelnetSideState::No;
+                    Some(Rfc2217Codec::encode_option(WONT, option))
+                }
+                TelnetSideState::WantYes => {
+                    entry.us = TelnetSideState::No;
+                    None
+                }
+            },
+            _ => None,
+        }
+    }
+}
+
 /// Converts outbound `PinState` changes to RFC 2217 `SET_CONTROL` commands
 pub fn pin_state_to_control(new_pins: PinState, old_pins: PinState) -> Vec<Rfc2217Command> {
     let mut cmds = Vec::new();
@@ -437,5 +573,78 @@ mod tests {
         assert_eq!(cmds.len(), 2);
         assert!(cmds.contains(&Rfc2217Command::SetControl(CONTROL_DTR_ON)));
         assert!(cmds.contains(&Rfc2217Command::SetControl(CONTROL_RTS_ON)));
+    }
+
+    #[test]
+    fn test_negotiator_simultaneous_open_converges_without_loop() {
+        let mut client = Rfc2217Negotiator::new();
+        let mut server = Rfc2217Negotiator::new();
+
+        // Both ends proactively send DO 44 + WILL 44.
+        let c_init = client.initiate_com_port();
+        let s_init = server.initiate_com_port();
+        assert_eq!(c_init.len(), 2);
+        assert_eq!(s_init.len(), 2);
+
+        let mut codec = Rfc2217Codec::new();
+        let (_, _, s_inbound) =
+            codec.decode_chunk(&[c_init[0].as_ref(), c_init[1].as_ref()].concat());
+        for (verb, opt) in s_inbound {
+            assert_eq!(
+                server.handle_negotiation(verb, opt),
+                None,
+                "WantYes must settle to Yes without echoing DO/WILL"
+            );
+        }
+
+        let (_, _, c_inbound) =
+            codec.decode_chunk(&[s_init[0].as_ref(), s_init[1].as_ref()].concat());
+        for (verb, opt) in c_inbound {
+            assert_eq!(client.handle_negotiation(verb, opt), None);
+        }
+
+        assert_eq!(client.is_option_enabled(COM_PORT_OPTION), (true, true));
+        assert_eq!(server.is_option_enabled(COM_PORT_OPTION), (true, true));
+
+        // Duplicate WILL/DO after activation must produce zero replies.
+        assert_eq!(client.handle_negotiation(WILL, COM_PORT_OPTION), None);
+        assert_eq!(client.handle_negotiation(DO, COM_PORT_OPTION), None);
+    }
+
+    #[test]
+    fn test_negotiator_accepts_passive_requests_and_rejects_unknown_options() {
+        let mut peer = Rfc2217Negotiator::new();
+
+        // Passive peer receives unsolicited DO 44 and WILL 44 -> replies WILL 44 / DO 44 once.
+        assert_eq!(
+            peer.handle_negotiation(DO, COM_PORT_OPTION),
+            Some(Rfc2217Codec::encode_option(WILL, COM_PORT_OPTION))
+        );
+        assert_eq!(
+            peer.handle_negotiation(WILL, COM_PORT_OPTION),
+            Some(Rfc2217Codec::encode_option(DO, COM_PORT_OPTION))
+        );
+        // Binary & Suppress-Go-Ahead are accepted; duplicate DO produces None.
+        assert_eq!(
+            peer.handle_negotiation(DO, TRANSMIT_BINARY),
+            Some(Rfc2217Codec::encode_option(WILL, TRANSMIT_BINARY))
+        );
+        assert_eq!(
+            peer.handle_negotiation(WILL, SUPPRESS_GO_AHEAD),
+            Some(Rfc2217Codec::encode_option(DO, SUPPRESS_GO_AHEAD))
+        );
+        assert_eq!(peer.handle_negotiation(DO, TRANSMIT_BINARY), None);
+
+        // Unsupported option (e.g. 99) elicits WONT/DONT; peer's WONT/DONT confirmation produces None.
+        assert_eq!(
+            peer.handle_negotiation(DO, 99),
+            Some(Rfc2217Codec::encode_option(WONT, 99))
+        );
+        assert_eq!(peer.handle_negotiation(DONT, 99), None);
+        assert_eq!(
+            peer.handle_negotiation(WILL, 99),
+            Some(Rfc2217Codec::encode_option(DONT, 99))
+        );
+        assert_eq!(peer.handle_negotiation(WONT, 99), None);
     }
 }
