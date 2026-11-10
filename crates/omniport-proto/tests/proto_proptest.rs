@@ -1,5 +1,7 @@
 use omniport_proto::codec::{read_message, write_message};
-use omniport_proto::{MAX_FRAME_SIZE, ProtoError, Request, Response, SerialConfigDto};
+use omniport_proto::{
+    MAX_FRAME_SIZE, MAX_VIEWPORT_BATCH_BYTES, ProtoError, Request, Response, SerialConfigDto,
+};
 use proptest::prelude::*;
 
 proptest! {
@@ -71,7 +73,7 @@ proptest! {
             write_message(&mut client, &req).await.unwrap();
             assert_eq!(read_message::<_, Request>(&mut server).await.unwrap(), req);
 
-            let resp = Response::ViewportBatch { bytes };
+            let resp = Response::viewport_batch(bytes);
             write_message(&mut server, &resp).await.unwrap();
             assert_eq!(read_message::<_, Response>(&mut client).await.unwrap(), resp);
 
@@ -90,6 +92,55 @@ proptest! {
             );
         });
     }
+}
+
+#[test]
+fn test_viewport_batch_bytes_travel_base64_encoded_in_json() {
+    let resp = Response::viewport_batch(vec![0xDE, 0xAD, 0xBE, 0xEF]);
+    let json = serde_json::to_string(&resp).unwrap();
+    assert!(
+        json.contains("3q2+7w=="),
+        "viewport bytes must be base64, got: {json}"
+    );
+    // A JSON array of four byte values would already be ~4x this size; more
+    // importantly a real batch would be tens of times larger on the wire.
+    assert!(
+        json.len() < 64,
+        "base64 payload should stay compact: {json}"
+    );
+    let decoded: Response = serde_json::from_str(&json).unwrap();
+    assert_eq!(decoded, resp);
+}
+
+#[test]
+fn test_oversized_viewport_batch_is_rejected_with_413() {
+    let oversized = vec![0u8; MAX_VIEWPORT_BATCH_BYTES + 1];
+    match Response::viewport_batch(oversized) {
+        Response::Error { code, message } => {
+            assert_eq!(code, 413);
+            assert!(message.contains("exceeds"), "unexpected message: {message}");
+        }
+        other => panic!("expected a 413 protocol error, got {other:?}"),
+    }
+}
+
+#[test]
+fn test_viewport_batch_at_limit_is_accepted() {
+    let at_limit = vec![0u8; MAX_VIEWPORT_BATCH_BYTES];
+    match Response::viewport_batch(at_limit) {
+        Response::ViewportBatch { .. } => {}
+        other => panic!("an at-limit batch must be accepted, got {other:?}"),
+    }
+}
+
+#[test]
+fn test_viewport_batch_budget_fits_the_json_frame_limit() {
+    // Worst-case base64 expansion plus the small JSON envelope must fit the frame.
+    let worst_case = MAX_VIEWPORT_BATCH_BYTES.div_ceil(3) * 4 + 64;
+    assert!(
+        worst_case < MAX_FRAME_SIZE,
+        "base64 worst case {worst_case} does not fit MAX_FRAME_SIZE {MAX_FRAME_SIZE}"
+    );
 }
 
 #[tokio::test]

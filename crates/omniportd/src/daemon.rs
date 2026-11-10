@@ -125,7 +125,7 @@ impl DaemonEngine {
                     .engine
                     .read_viewport_batch(start_row, row_count as usize)
                     .encode_to_vec();
-                return Response::ViewportBatch { bytes };
+                return Response::viewport_batch(bytes);
             }
             Request::CaptureStatus => {
                 let capture = self.capture.read().await;

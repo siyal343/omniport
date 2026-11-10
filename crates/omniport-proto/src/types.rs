@@ -1,6 +1,14 @@
 use omniport_core::SerialConfig;
 use serde::{Deserialize, Serialize};
 
+/// Maximum raw size of one ICD §2 viewport batch sent over the control plane.
+///
+/// The control plane is JSON framed by [`crate::codec::MAX_FRAME_SIZE`] (16 MiB),
+/// so this cap keeps the base64-encoded batch (~4/3 expansion) inside the frame
+/// budget with room for the JSON envelope. Larger requests are refused explicitly
+/// instead of failing later inside the codec with a less actionable error.
+pub const MAX_VIEWPORT_BATCH_BYTES: usize = 8 * 1024 * 1024;
+
 /// Serializable serial configuration DTO
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub struct SerialConfigDto {
@@ -105,7 +113,12 @@ pub enum Response {
         message: String,
     },
     /// ICD §2 encoded binary viewport batch.
+    ///
+    /// The control-plane codec is JSON: a JSON array of byte values would inflate
+    /// a payload several-fold, so `bytes` travels as a base64 string on the wire
+    /// (see [`Response::viewport_batch`] for the size policy).
     ViewportBatch {
+        #[serde(with = "viewport_bytes")]
         bytes: Vec<u8>,
     },
     CaptureStatus {
@@ -119,4 +132,43 @@ pub enum Response {
         code: u32,
         message: String,
     },
+}
+
+impl Response {
+    /// Wraps an ICD §2 viewport batch, enforcing the control-plane size budget.
+    ///
+    /// Base64 expansion is at most 4/3, so [`MAX_VIEWPORT_BATCH_BYTES`] (8 MiB)
+    /// becomes ~10.7 MiB on the wire and still fits the 16 MiB JSON frame limit.
+    /// Oversized batches are reported as a 413 protocol error rather than a
+    /// generic codec failure at a later layer.
+    pub fn viewport_batch(bytes: Vec<u8>) -> Self {
+        if bytes.len() > MAX_VIEWPORT_BATCH_BYTES {
+            return Self::Error {
+                code: 413,
+                message: format!(
+                    "viewport batch of {} bytes exceeds the {} byte control-plane limit",
+                    bytes.len(),
+                    MAX_VIEWPORT_BATCH_BYTES
+                ),
+            };
+        }
+        Self::ViewportBatch { bytes }
+    }
+}
+
+/// Base64 serde for raw viewport bytes inside the JSON control-plane payload.
+mod viewport_bytes {
+    use base64::Engine as _;
+    use serde::{Deserialize, Deserializer, Serializer};
+
+    pub fn serialize<S: Serializer>(bytes: &[u8], serializer: S) -> Result<S::Ok, S::Error> {
+        serializer.serialize_str(&base64::engine::general_purpose::STANDARD.encode(bytes))
+    }
+
+    pub fn deserialize<'de, D: Deserializer<'de>>(deserializer: D) -> Result<Vec<u8>, D::Error> {
+        let encoded = String::deserialize(deserializer)?;
+        base64::engine::general_purpose::STANDARD
+            .decode(encoded.as_bytes())
+            .map_err(serde::de::Error::custom)
+    }
 }

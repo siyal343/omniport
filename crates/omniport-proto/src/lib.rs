@@ -27,4 +27,4 @@ pub mod types;
 pub use client::RpcClient;
 pub use codec::{MAX_FRAME_SIZE, read_message, write_message};
 pub use error::{ProtoError, Result};
-pub use types::{EndpointInfo, Request, Response, SerialConfigDto};
+pub use types::{EndpointInfo, MAX_VIEWPORT_BATCH_BYTES, Request, Response, SerialConfigDto};
