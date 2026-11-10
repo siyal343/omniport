@@ -265,6 +265,13 @@ mod tests {
         #[cfg(not(unix))]
         poller.set_mock_config(updated);
 
+        // A unix poller without a slave fd cannot observe a termios change.
+        #[cfg(unix)]
+        {
+            assert_eq!(updated.baud_rate, 115_200);
+            assert_eq!(poller.poll().unwrap(), None);
+        }
+
         #[cfg(not(unix))]
         {
             let res = poller.poll().unwrap();

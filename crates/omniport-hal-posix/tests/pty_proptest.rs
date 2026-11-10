@@ -1,6 +1,7 @@
+use omniport_core::AsyncEndpoint;
 use omniport_core::SerialConfig;
 #[cfg(not(unix))]
-use omniport_core::{AsyncEndpoint, FrameFlags, PinState, SerialEvent};
+use omniport_core::{FrameFlags, PinState, SerialEvent};
 use omniport_hal_posix::{PtyEndpoint, SymlinkManager, TokenBucketThrottler, calculate_byte_rate};
 use proptest::prelude::*;
 #[cfg(not(unix))]
