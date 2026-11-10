@@ -45,9 +45,17 @@ pub fn run() {
     let app_state = AppCaptureState(RwLock::new(engine));
 
     // 2. Launch Tauri workbench application
-    tauri::Builder::default()
+    let app = tauri::Builder::default()
         .manage(app_state)
         .invoke_handler(tauri::generate_handler![commands::fetch_viewport_rows])
-        .run(tauri::generate_context!())
-        .expect("error while running tauri application");
+        .build(tauri::generate_context!());
+
+    match app {
+        Ok(app) => {
+            app.run(|_app_handle, _event| {});
+        }
+        Err(e) => {
+            panic!("Tauri build error: {e}");
+        }
+    }
 }
