@@ -7,6 +7,9 @@ use omniport_core::SerialConfig;
 use std::os::unix::io::RawFd;
 
 #[cfg(unix)]
+// `speed_t` is a u32 on Linux but a wider type on some BSDs/macOS, so the cast is
+// load-bearing there and merely redundant on Linux.
+#[allow(clippy::unnecessary_cast)]
 pub fn speed_to_baud(speed: libc::speed_t) -> Result<u32> {
     let baud = match speed {
         libc::B50 => 50,

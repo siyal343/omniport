@@ -1278,7 +1278,16 @@ mod linux_cuse {
             return Err(HalError::OpenCuse(std::io::Error::last_os_error()));
         }
 
-        let async_fd = AsyncFd::new(owned_fd).map_err(HalError::OpenCuse)?;
+        // SAFETY: `owned_fd` is an owned descriptor kept alive inside the AsyncFd;
+        // nothing closes or replaces it behind the registration. `AsyncFd::new` is
+        // deprecated for lacking I/O safety.
+        let async_fd = match unsafe { AsyncFd::register(owned_fd) } {
+            Ok(fd) => fd,
+            Err(err) => {
+                let (_fd, cause) = err.into_parts();
+                return Err(HalError::OpenCuse(cause));
+            }
+        };
         let (shutdown_tx, shutdown_rx) = oneshot::channel();
         rt.spawn(run_cuse_loop(
             async_fd,

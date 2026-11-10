@@ -135,7 +135,16 @@ impl PtyEndpoint {
         {
             let (master_fd, slave_path) = open_unix_pty()?;
             let poller = TermiosPoller::new(Some(master_fd.as_raw_fd()), config);
-            let async_fd = tokio::io::unix::AsyncFd::new(master_fd).map_err(HalError::Io)?;
+            // SAFETY: `master_fd` is an owned descriptor that is kept alive inside the
+            // AsyncFd until it is dropped; nothing closes or replaces it behind the
+            // registration. `AsyncFd::new` is deprecated for lacking I/O safety.
+            let async_fd = match unsafe { tokio::io::unix::AsyncFd::register(master_fd) } {
+                Ok(fd) => fd,
+                Err(err) => {
+                    let (_fd, cause) = err.into_parts();
+                    return Err(HalError::Io(cause));
+                }
+            };
 
             let symlink = if let Some(link) = symlink_path {
                 Some(SymlinkManager::create(&slave_path, link)?)
