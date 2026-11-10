@@ -146,6 +146,13 @@ jobs:
           path: apps/omniport-desktop/src-tauri/target/release/omniport-desktop.exe
           if-no-files-found: error
 
+      # The production installers must not ship a remote-debugging port, so the
+      # smoke binary is rebuilt from the same source with the test-only
+      # tauri.smoke.conf.json (additionalBrowserArgs enables WebView2 CDP).
+      - name: Rebuild release binary with CDP for the packaged smoke test
+        working-directory: apps/omniport-desktop
+        run: npx tauri build --no-bundle --config src-tauri/tauri.smoke.conf.json
+
       - name: Smoke-launch packaged release binary (embedded frontend)
         working-directory: apps/omniport-desktop
         run: node scripts/smoke-packaged.mjs

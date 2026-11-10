@@ -1,0 +1,17 @@
+{
+  "$schema": "https://schema.tauri.app/config/2",
+  "app": {
+    "windows": [
+      {
+        "label": "main",
+        "title": "OmniPort — Virtual Serial Router & Dissector",
+        "width": 1280,
+        "height": 800,
+        "resizable": true,
+        "fullscreen": false,
+        "url": "index.html",
+        "additionalBrowserArgs": "--remote-debugging-port=9350 --remote-allow-origins=*"
+      }
+    ]
+  }
+}

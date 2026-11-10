@@ -50,7 +50,11 @@ node scripts/smoke-packaged.mjs
 
 The smoke test launches the **release binary** (the same binary installed by the
 MSI/NSIS packages, not the `tauri dev` debug build) with the host forced into its
-disconnected state and asserts, over the WebView2 CDP endpoint:
+disconnected state and asserts, over the WebView2 CDP endpoint. CI rebuilds only
+the smoke binary with the test-only `src-tauri/tauri.smoke.conf.json`, whose
+`additionalBrowserArgs` opens the CDP port — hosted runners ignore
+`WEBVIEW2_ADDITIONAL_BROWSER_ARGUMENTS`, and the production installers must not
+ship a debugging port. The assertions are:
 
 1. the window serves the embedded frontend over the Tauri custom protocol — no
    `http://localhost:5173` Vite dev server;
