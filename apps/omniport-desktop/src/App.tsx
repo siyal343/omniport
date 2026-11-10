@@ -2,7 +2,6 @@ import React, { useCallback, useEffect, useMemo, useState } from "react";
 import { invoke } from "@tauri-apps/api/core";
 import { SerialWorkbench } from "./components/SerialWorkbench/SerialWorkbench.tsx";
 import { fetchViewport } from "./ipc/viewportClient.ts";
-import { createDemoViewport } from "./ipc/demoStream.ts";
 import { createViewportSession } from "./ipc/useViewportSession.ts";
 import type { ViewportSource, ViewportSourceKind } from "./ipc/viewportSession.ts";
 import { parseCaptureStatus, type HostCaptureStatus } from "./ipc/captureStatus.ts";
@@ -11,20 +10,31 @@ export const App: React.FC = () => {
   const isTauri =
     typeof window !== "undefined" &&
     ("__TAURI_INTERNALS__" in window || "__TAURI__" in window);
-  const sourceKind: ViewportSourceKind = isTauri ? "tauri" : "demo";
+  const isDevDemoBrowser = !isTauri && import.meta.env.DEV;
+  const sourceKind: ViewportSourceKind = isDevDemoBrowser ? "demo" : "tauri";
 
-  // Tauri adapter: NO demo fallback on IPC failure — the session surfaces
-  // status "error" and the workbench renders CAPTURE DISCONNECTED. Browser dev
-  // uses the single demo adapter and stays labelled DEMO STREAM.
+  // Select the single viewport adapter once at startup:
+  // - In Tauri: always invoke the host CaptureStore (never fall back to demo).
+  // - In browser `vite dev` only: dynamically load the labelled DEMO STREAM.
+  // - Outside Tauri in production builds: fail loudly without bundling demo data.
   const source = useMemo<ViewportSource>(() => {
     if (isTauri) {
       return { read: (startRow: number, rowCount: number) => fetchViewport(startRow, rowCount) };
     }
+    if (isDevDemoBrowser) {
+      return {
+        read: async (startRow: number, rowCount: number) => {
+          const { createDemoViewport } = await import("./ipc/demoStream.ts");
+          return createDemoViewport({ startRow, rowCount });
+        },
+      };
+    }
     return {
-      read: async (startRow: number, rowCount: number) =>
-        createDemoViewport({ startRow, rowCount }),
+      read: async () => {
+        throw new Error("Tauri capture host is unavailable outside the desktop shell");
+      },
     };
-  }, [isTauri]);
+  }, [isTauri, isDevDemoBrowser]);
 
   // One window owner for the whole app lifetime. Not disposed on unmount:
   // under React StrictMode the effect cleanup would kill the session between

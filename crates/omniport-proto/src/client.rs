@@ -121,6 +121,33 @@ impl RpcClient {
         }
     }
 
+    /// Reads an ICD §2 encoded viewport batch from `omniportd`
+    pub async fn read_viewport(&mut self, start_row: u64, row_count: u32) -> Result<Vec<u8>> {
+        match self
+            .request(Request::ReadViewport {
+                start_row,
+                row_count,
+            })
+            .await?
+        {
+            Response::ViewportBatch { bytes } => Ok(bytes),
+            Response::Error { message, .. } => Err(ProtoError::ServerError(message)),
+            other => Err(ProtoError::UnexpectedResponse(format!("{:?}", other))),
+        }
+    }
+
+    /// Queries capture store packet and drop counters from `omniportd`
+    pub async fn capture_status(&mut self) -> Result<(u64, u64)> {
+        match self.request(Request::CaptureStatus).await? {
+            Response::CaptureStatus {
+                total_packets,
+                dropped_frames,
+            } => Ok((total_packets, dropped_frames)),
+            Response::Error { message, .. } => Err(ProtoError::ServerError(message)),
+            other => Err(ProtoError::UnexpectedResponse(format!("{:?}", other))),
+        }
+    }
+
     /// Asks the daemon to gracefully shut down
     pub async fn shutdown(&mut self) -> Result<()> {
         match self.request(Request::Shutdown).await? {

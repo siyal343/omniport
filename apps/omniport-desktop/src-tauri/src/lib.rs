@@ -1,79 +1,20 @@
 //! OmniPort Desktop Tauri v2 Application Library.
 
+pub mod capture_store;
 pub mod commands;
 
-pub use commands::{
-    AppCaptureState, CaptureStatus, MAX_VIEWPORT_ROWS, capture_status, fetch_viewport_binary,
-    fetch_viewport_rows,
+pub use capture_store::{
+    CaptureStatus, CaptureStore, DEFAULT_DAEMON_ADDR, DaemonCaptureStore, DisconnectedCaptureStore,
+    FixtureCaptureStore, StoreFuture,
 };
-use omniport_capture::MmapCaptureEngine;
+pub use commands::{AppCaptureState, MAX_VIEWPORT_ROWS, capture_status, fetch_viewport_rows};
+use std::sync::Arc;
 
-/// Size of the desktop viewport ring: 100k frames / 16 MiB of payload data.
-const DESKTOP_MAX_PACKETS: u64 = 100_000;
-const DESKTOP_MAX_DATA_BYTES: u64 = 16 * 1024 * 1024;
-
-/// Opens the dual-mmap capture store for the desktop viewport streamer.
-///
-/// Prefers the OS temp directory and falls back to `target/desktop_mmap` when
-/// temp is unavailable (locked-down profiles, read-only temp, CI sandboxes).
-fn create_capture_engine() -> std::io::Result<MmapCaptureEngine> {
-    let capture_dir = std::env::temp_dir().join("omniport_desktop_capture");
-    std::fs::create_dir_all(&capture_dir)?;
-    match MmapCaptureEngine::create(&capture_dir, DESKTOP_MAX_PACKETS, DESKTOP_MAX_DATA_BYTES) {
-        Ok(engine) => Ok(engine),
-        Err(_primary_err) => {
-            let fallback_dir = std::env::current_dir()?.join("target").join("desktop_mmap");
-            std::fs::create_dir_all(&fallback_dir)?;
-            MmapCaptureEngine::create(&fallback_dir, DESKTOP_MAX_PACKETS, DESKTOP_MAX_DATA_BYTES)
-        }
-    }
-}
-
-/// Seeds a small deterministic frame set so the hex monitor, logic strip and
-/// telemetry panels have content before `omniportd` is connected.
-///
-/// NOTE: this is a temporary bridge until the desktop client consumes the
-/// daemon's live capture session; see docs/adr/0001-daemon-first-architecture.md.
-fn seed_demo_session(engine: &mut MmapCaptureEngine) {
-    let base_time = 1_700_000_000_000_000_000u64;
-    for i in 0..25 {
-        let is_tx = i % 2 == 0;
-        let evt = omniport_core::SerialEvent {
-            timestamp_ns: base_time + i * 5_000_000,
-            source_id: if is_tx { 1 } else { 2 },
-            flags: if is_tx {
-                omniport_core::FrameFlags::DIR_TX
-            } else {
-                omniport_core::FrameFlags::empty()
-            },
-            pins: omniport_core::PinState::RTS | omniport_core::PinState::DTR,
-            payload: bytes::Bytes::copy_from_slice(
-                format!("OMNIPORT_INITIAL_FRAME_{:03}\r\n", i).as_bytes(),
-            ),
-        };
-        engine.append_event(&evt);
-    }
-}
-
-/// Decides whether the host fabricates a demo capture session at startup.
-///
-/// The seeded frames exist so the workbench shows something before `omniportd`
-/// is connected. They must never masquerade as live traffic in a release build:
-/// debug builds seed by default, release builds only when `OMNIPORT_DESKTOP_DEMO=1`,
-/// and either can opt out with `OMNIPORT_DESKTOP_DEMO=0`.
-fn demo_session_enabled_from(var: Option<&str>, is_debug: bool) -> bool {
-    match var {
-        Some("0") | Some("false") | Some("off") => false,
-        Some(_) => true,
-        None => is_debug,
-    }
-}
-
-fn demo_session_enabled() -> bool {
-    demo_session_enabled_from(
-        std::env::var("OMNIPORT_DESKTOP_DEMO").ok().as_deref(),
-        cfg!(debug_assertions),
-    )
+#[derive(Debug, Clone, PartialEq, Eq)]
+enum CaptureStoreTarget {
+    Disconnected(String),
+    FixtureDemo,
+    Daemon { addr: String },
 }
 
 /// Optional fault-injection hook (`OMNIPORT_DESKTOP_DISCONNECT=1`) so smoke
@@ -89,24 +30,63 @@ fn forced_disconnect_reason(var: Option<&str>) -> Option<String> {
     }
 }
 
-fn build_capture_state() -> AppCaptureState {
-    if let Some(reason) =
-        forced_disconnect_reason(std::env::var("OMNIPORT_DESKTOP_DISCONNECT").ok().as_deref())
-    {
-        return AppCaptureState::disconnected(reason);
+fn resolve_daemon_addr(var: Option<&str>) -> String {
+    match var.map(str::trim) {
+        Some(addr) if !addr.is_empty() => addr.to_string(),
+        _ => DEFAULT_DAEMON_ADDR.to_string(),
+    }
+}
+
+/// Selects the single `CaptureStore` adapter once at host startup.
+///
+/// Shipping release builds default to `DaemonCaptureStore` (`omniportd`). The
+/// demo fixture adapter is only selected for debug builds (when no daemon
+/// address was specified) or when `OMNIPORT_DESKTOP_DEMO=1` is explicitly set.
+fn select_capture_target(
+    disconnect_env: Option<&str>,
+    demo_env: Option<&str>,
+    daemon_addr_env: Option<&str>,
+    is_debug: bool,
+) -> CaptureStoreTarget {
+    if let Some(reason) = forced_disconnect_reason(disconnect_env) {
+        return CaptureStoreTarget::Disconnected(reason);
     }
 
-    match create_capture_engine() {
-        Ok(mut engine) => {
-            let demo_mode = demo_session_enabled();
-            if demo_mode {
-                seed_demo_session(&mut engine);
+    let addr = resolve_daemon_addr(daemon_addr_env);
+    let has_explicit_addr = daemon_addr_env.is_some_and(|s| !s.trim().is_empty());
+
+    match demo_env.map(str::trim) {
+        Some("0") | Some("false") | Some("off") => CaptureStoreTarget::Daemon { addr },
+        Some("") | None => {
+            if has_explicit_addr || !is_debug {
+                CaptureStoreTarget::Daemon { addr }
+            } else {
+                CaptureStoreTarget::FixtureDemo
             }
-            AppCaptureState::connected(engine, demo_mode)
         }
-        Err(err) => {
-            AppCaptureState::disconnected(format!("Failed to open desktop capture store: {err}"))
+        Some(_) => CaptureStoreTarget::FixtureDemo,
+    }
+}
+
+fn build_capture_state() -> AppCaptureState {
+    let target = select_capture_target(
+        std::env::var("OMNIPORT_DESKTOP_DISCONNECT").ok().as_deref(),
+        std::env::var("OMNIPORT_DESKTOP_DEMO").ok().as_deref(),
+        std::env::var("OMNIPORT_DAEMON_ADDR").ok().as_deref(),
+        cfg!(debug_assertions),
+    );
+
+    match target {
+        CaptureStoreTarget::Disconnected(reason) => AppCaptureState::disconnected(reason),
+        CaptureStoreTarget::Daemon { addr } => {
+            AppCaptureState::new(Arc::new(DaemonCaptureStore::new(addr)))
         }
+        CaptureStoreTarget::FixtureDemo => match FixtureCaptureStore::seeded() {
+            Ok(fixture) => AppCaptureState::new(Arc::new(fixture)),
+            Err(err) => {
+                AppCaptureState::disconnected(format!("Failed to open demo fixture store: {err}"))
+            }
+        },
     }
 }
 
@@ -132,33 +112,53 @@ mod tests {
     use super::*;
 
     #[test]
-    fn test_create_capture_engine_succeeds_and_is_empty() {
-        let engine = create_capture_engine().expect("capture engine should initialize");
-        assert_eq!(engine.packet_count(), 0);
-    }
-
-    #[test]
-    fn test_seed_demo_session_is_deterministic() {
-        let dir = std::env::temp_dir().join(format!("omniport_seed_test_{}", std::process::id()));
-        let _ = std::fs::create_dir_all(&dir);
-        let mut engine = MmapCaptureEngine::create(&dir, 64, 4096).unwrap();
-        seed_demo_session(&mut engine);
-        assert_eq!(engine.packet_count(), 25);
-        let mut wire = Vec::new();
-        engine.read_viewport(0, 1, &mut wire);
-        assert!(wire.len() > 16);
-        let _ = std::fs::remove_dir_all(&dir);
-    }
-
-    #[test]
-    fn test_demo_session_enabled_respects_profile_and_env() {
-        assert!(!demo_session_enabled_from(None, false));
-        assert!(demo_session_enabled_from(None, true));
-        assert!(!demo_session_enabled_from(Some("0"), true));
-        assert!(!demo_session_enabled_from(Some("false"), true));
-        assert!(!demo_session_enabled_from(Some("off"), true));
-        assert!(demo_session_enabled_from(Some("1"), false));
-        assert!(demo_session_enabled_from(Some("true"), false));
+    fn test_select_capture_target_respects_profile_and_env() {
+        // Release build defaults to DaemonCaptureStore.
+        assert_eq!(
+            select_capture_target(None, None, None, false),
+            CaptureStoreTarget::Daemon {
+                addr: DEFAULT_DAEMON_ADDR.to_string()
+            }
+        );
+        // Debug build defaults to FixtureCaptureStore unless daemon addr or DEMO=0 is set.
+        assert_eq!(
+            select_capture_target(None, None, None, true),
+            CaptureStoreTarget::FixtureDemo
+        );
+        assert_eq!(
+            select_capture_target(None, None, Some("127.0.0.1:6000"), true),
+            CaptureStoreTarget::Daemon {
+                addr: "127.0.0.1:6000".to_string()
+            }
+        );
+        assert_eq!(
+            select_capture_target(None, Some("0"), None, true),
+            CaptureStoreTarget::Daemon {
+                addr: DEFAULT_DAEMON_ADDR.to_string()
+            }
+        );
+        assert_eq!(
+            select_capture_target(None, Some("false"), None, true),
+            CaptureStoreTarget::Daemon {
+                addr: DEFAULT_DAEMON_ADDR.to_string()
+            }
+        );
+        // Release build still allows explicit demo opt-in.
+        assert_eq!(
+            select_capture_target(None, Some("1"), None, false),
+            CaptureStoreTarget::FixtureDemo
+        );
+        assert_eq!(
+            select_capture_target(None, Some(""), None, false),
+            CaptureStoreTarget::Daemon {
+                addr: DEFAULT_DAEMON_ADDR.to_string()
+            }
+        );
+        // Disconnect override wins over everything.
+        assert!(matches!(
+            select_capture_target(Some("1"), Some("1"), None, true),
+            CaptureStoreTarget::Disconnected(_)
+        ));
     }
 
     #[test]

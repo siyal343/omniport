@@ -18,7 +18,7 @@ serde.workspace = true
 serde_json.workspace = true
 bytes.workspace = true
 tokio.workspace = true
+tempfile.workspace = true
 
 [dev-dependencies]
-tempfile.workspace = true
 proptest.workspace = true

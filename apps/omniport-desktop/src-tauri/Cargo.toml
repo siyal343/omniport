@@ -21,14 +21,18 @@ custom-protocol = ["tauri/custom-protocol"]
 omniport-core = { path = "../../../crates/omniport-core" }
 omniport-capture = { path = "../../../crates/omniport-capture" }
 omniport-dissect = { path = "../../../crates/omniport-dissect" }
+omniport-proto = { path = "../../../crates/omniport-proto" }
 tauri = { version = "2.2", features = ["devtools"] }
 serde = { version = "1.0", features = ["derive"] }
 serde_json = "1.0"
 bytes = "1.9"
+tokio = { version = "1.43", features = ["sync", "time"] }
+tempfile = "3.16"
 
 [build-dependencies]
 tauri-build = { version = "2.2", features = [] }
 
 [dev-dependencies]
-tempfile = "3.16"
+omniportd = { path = "../../../crates/omniportd" }
 bytes = "1.9"
+tokio = { version = "1.43", features = ["macros", "rt", "net"] }

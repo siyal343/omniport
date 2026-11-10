@@ -15,6 +15,8 @@ service OmniPortControl {
   rpc RemoveEndpoint (RemoveEndpointRequest) returns (RemoveEndpointResponse);
   rpc AddRoute (AddRouteRequest) returns (AddRouteResponse);
   rpc RemoveRoute (RemoveRouteRequest) returns (RemoveRouteResponse);
+  rpc ReadViewport (ReadViewportRequest) returns (ReadViewportResponse);
+  rpc CaptureStatus (CaptureStatusRequest) returns (CaptureStatusResponse);
   rpc Shutdown (ShutdownRequest) returns (ShutdownResponse);
 }
 
@@ -90,6 +92,22 @@ message RemoveRouteRequest {
 message RemoveRouteResponse {
   bool success = 1;
   string message = 2;
+}
+
+message ReadViewportRequest {
+  uint64 start_row = 1;
+  uint32 row_count = 2;
+}
+
+message ReadViewportResponse {
+  bytes bytes = 1;
+}
+
+message CaptureStatusRequest {}
+
+message CaptureStatusResponse {
+  uint64 total_packets = 1;
+  uint64 dropped_frames = 2;
 }
 
 message ShutdownRequest {}

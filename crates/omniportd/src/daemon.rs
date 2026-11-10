@@ -1,9 +1,21 @@
+use omniport_capture::MmapCaptureEngine;
+use omniport_core::SerialEvent;
 use omniport_proto::{EndpointInfo, Request, Response};
 use std::collections::HashMap;
+use std::path::Path;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::Instant;
-use tokio::sync::{Mutex, broadcast};
+use tokio::sync::{Mutex, RwLock, broadcast};
+
+const DAEMON_CAPTURE_MAX_PACKETS: u64 = 100_000;
+const DAEMON_CAPTURE_MAX_BYTES: u64 = 16 * 1024 * 1024;
+
+struct DaemonCapture {
+    // Drop `engine` before `_dir` so memory-mapped files unmap before TempDir cleanup on Windows.
+    engine: MmapCaptureEngine,
+    _dir: Option<tempfile::TempDir>,
+}
 
 #[derive(Debug, Clone)]
 pub struct RouteEntry {
@@ -38,6 +50,7 @@ impl Default for DaemonState {
 
 pub struct DaemonEngine {
     pub state: Arc<Mutex<DaemonState>>,
+    capture: RwLock<DaemonCapture>,
     pub shutdown_tx: broadcast::Sender<()>,
     pub is_shutting_down: Arc<AtomicBool>,
 }
@@ -50,12 +63,42 @@ impl Default for DaemonEngine {
 
 impl DaemonEngine {
     pub fn new() -> Self {
+        Self::try_new().expect("failed to initialize omniportd capture store")
+    }
+
+    pub fn try_new() -> std::io::Result<Self> {
+        let dir = tempfile::tempdir()?;
+        let engine = MmapCaptureEngine::create(
+            dir.path(),
+            DAEMON_CAPTURE_MAX_PACKETS,
+            DAEMON_CAPTURE_MAX_BYTES,
+        )?;
+        Ok(Self::from_capture(DaemonCapture {
+            engine,
+            _dir: Some(dir),
+        }))
+    }
+
+    pub fn with_capture_dir(dir: &Path) -> std::io::Result<Self> {
+        std::fs::create_dir_all(dir)?;
+        let engine =
+            MmapCaptureEngine::create(dir, DAEMON_CAPTURE_MAX_PACKETS, DAEMON_CAPTURE_MAX_BYTES)?;
+        Ok(Self::from_capture(DaemonCapture { engine, _dir: None }))
+    }
+
+    fn from_capture(capture: DaemonCapture) -> Self {
         let (shutdown_tx, _) = broadcast::channel(4);
         Self {
             state: Arc::new(Mutex::new(DaemonState::default())),
+            capture: RwLock::new(capture),
             shutdown_tx,
             is_shutting_down: Arc::new(AtomicBool::new(false)),
         }
+    }
+
+    /// Appends a captured serial frame to the daemon's dual-mmap store.
+    pub async fn record_event(&self, event: &SerialEvent) {
+        self.capture.write().await.engine.append_event(event);
     }
 
     pub fn subscribe_shutdown(&self) -> broadcast::Receiver<()> {
@@ -70,6 +113,28 @@ impl DaemonEngine {
                 code: 503,
                 message: "omniportd is shutting down".to_string(),
             };
+        }
+
+        match req {
+            Request::ReadViewport {
+                start_row,
+                row_count,
+            } => {
+                let capture = self.capture.read().await;
+                let bytes = capture
+                    .engine
+                    .read_viewport_batch(start_row, row_count as usize)
+                    .encode_to_vec();
+                return Response::ViewportBatch { bytes };
+            }
+            Request::CaptureStatus => {
+                let capture = self.capture.read().await;
+                return Response::CaptureStatus {
+                    total_packets: capture.engine.packet_count(),
+                    dropped_frames: capture.engine.dropped_frames(),
+                };
+            }
+            _ => {}
         }
 
         let mut state = self.state.lock().await;
@@ -263,6 +328,9 @@ impl DaemonEngine {
                     message: "omniportd shutdown initiated".to_string(),
                 }
             }
+            Request::ReadViewport { .. } | Request::CaptureStatus => {
+                unreachable!("capture queries are handled before locking daemon state")
+            }
         }
     }
 }
@@ -321,8 +389,16 @@ mod tests {
         assert!(matches!(resp, Response::Success { .. }));
         assert!(engine.is_shutting_down.load(Ordering::SeqCst));
 
-        // Health checks and mutations must not be served after shutdown.
-        for req in [Request::HealthCheck, Request::ListEndpoints] {
+        // Health checks, capture queries, and mutations must not be served after shutdown.
+        for req in [
+            Request::HealthCheck,
+            Request::ListEndpoints,
+            Request::CaptureStatus,
+            Request::ReadViewport {
+                start_row: 0,
+                row_count: 10,
+            },
+        ] {
             let resp = engine.handle_request(req).await;
             assert!(
                 matches!(resp, Response::Error { code: 503, .. }),

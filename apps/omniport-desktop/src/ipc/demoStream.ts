@@ -2,8 +2,8 @@
  * Browser demo stream adapter.
  *
  * This is the single frontend source of synthetic frames. It is used ONLY when
- * the app is running outside Tauri (plain Vite browser dev / GUI tests). The
- * first 25 frames mirror the host-side `seed_demo_session` frame naming so both
+ * the app is running outside Tauri in browser dev mode (`vite dev`). The
+ * first 25 frames mirror the host-side `FixtureCaptureStore` naming so both
  * demo layers stay recognisable, while the remaining frames give the virtual
  * scrollbar enough data to exercise real scrolling.
  *

@@ -1,103 +1,64 @@
-use omniport_capture::MmapCaptureEngine;
-use std::sync::RwLock;
+use crate::capture_store::{CaptureStatus, CaptureStore, DisconnectedCaptureStore};
+use std::sync::Arc;
 use tauri::{State, ipc::Response};
 
 /// Re-exported so the GUI/Tauri layer shares the capture crate's single limit.
 pub use omniport_capture::viewport::MAX_VIEWPORT_ROWS;
 
-/// Non-viewport metadata the frontend needs to describe the capture it is reading.
-///
-/// `demo_mode` lets the UI label a seeded/fixture session as demo data instead of
-/// presenting it as live hardware traffic.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize)]
-pub struct CaptureStatus {
-    pub demo_mode: bool,
-    pub total_packets: u64,
-    pub dropped_frames: u64,
-}
-
 pub struct AppCaptureState {
-    pub engine: RwLock<Result<MmapCaptureEngine, String>>,
-    pub demo_mode: bool,
+    store: Arc<dyn CaptureStore>,
 }
 
 impl AppCaptureState {
-    pub fn connected(engine: MmapCaptureEngine, demo_mode: bool) -> Self {
-        Self {
-            engine: RwLock::new(Ok(engine)),
-            demo_mode,
-        }
+    pub fn new(store: Arc<dyn CaptureStore>) -> Self {
+        Self { store }
     }
 
     pub fn disconnected(reason: impl Into<String>) -> Self {
-        Self {
-            engine: RwLock::new(Err(reason.into())),
-            demo_mode: false,
-        }
+        Self::new(Arc::new(DisconnectedCaptureStore::new(reason)))
     }
 
-    pub fn read_viewport(&self, start_row: u64, row_count: usize) -> Result<Vec<u8>, String> {
-        let guard = self.engine.read().map_err(|e| e.to_string())?;
-        let engine = guard.as_ref().map_err(Clone::clone)?;
-        Ok(fetch_viewport_binary(engine, start_row, row_count))
+    pub async fn read_viewport(&self, start_row: u64, row_count: usize) -> Result<Vec<u8>, String> {
+        self.store.read_viewport(start_row, row_count).await
     }
 
-    pub fn status(&self) -> Result<CaptureStatus, String> {
-        let guard = self.engine.read().map_err(|e| e.to_string())?;
-        let engine = guard.as_ref().map_err(Clone::clone)?;
-        Ok(CaptureStatus {
-            demo_mode: self.demo_mode,
-            total_packets: engine.packet_count(),
-            dropped_frames: engine.dropped_frames(),
-        })
+    pub async fn status(&self) -> Result<CaptureStatus, String> {
+        self.store.status().await
     }
 }
 
-/// Tauri IPC command to fetch a visible row slice from the dual-mmap capture store.
+/// Tauri IPC command to fetch a visible row slice from the active `CaptureStore`.
 /// Returns raw binary bytes according to ICD Section 2 without JSON overhead.
 #[tauri::command]
-pub fn fetch_viewport_rows(
+pub async fn fetch_viewport_rows(
     state: State<'_, AppCaptureState>,
     start_row: u64,
     row_count: usize,
 ) -> Result<Response, String> {
-    let raw_wire_buf = state.read_viewport(start_row, row_count)?;
+    let raw_wire_buf = state.read_viewport(start_row, row_count).await?;
     Ok(Response::new(raw_wire_buf))
 }
 
 /// Tauri IPC command describing the capture session behind `fetch_viewport_rows`.
 #[tauri::command]
-pub fn capture_status(state: State<'_, AppCaptureState>) -> Result<CaptureStatus, String> {
-    state.status()
-}
-
-/// Serializes the visible capture window as the ICD §2 binary viewport batch.
-///
-/// The layout, clamping and payload walking are owned by
-/// [`omniport_capture::viewport::ViewportBatch`]; this is only the Tauri adapter.
-pub fn fetch_viewport_binary(
-    engine: &MmapCaptureEngine,
-    start_row: u64,
-    row_count: usize,
-) -> Vec<u8> {
-    engine
-        .read_viewport_batch(start_row, row_count)
-        .encode_to_vec()
+pub async fn capture_status(state: State<'_, AppCaptureState>) -> Result<CaptureStatus, String> {
+    state.status().await
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::capture_store::FixtureCaptureStore;
     use bytes::Bytes;
+    use omniport_capture::MmapCaptureEngine;
     use omniport_core::{FrameFlags, PinState, SerialEvent};
     use tempfile::tempdir;
 
-    #[test]
-    fn test_fetch_viewport_binary_wire_format() {
+    #[tokio::test]
+    async fn test_app_capture_state_wire_format_and_slicing() {
         let dir = tempdir().unwrap();
         let mut engine = MmapCaptureEngine::create(dir.path(), 50, 4096).unwrap();
 
-        // Append 3 packets
         for i in 0..3 {
             let evt = SerialEvent {
                 timestamp_ns: 1_000_000 + i,
@@ -109,17 +70,16 @@ mod tests {
             engine.append_event(&evt);
         }
 
-        // Fetch all 3 packets
-        let wire = fetch_viewport_binary(&engine, 0, 10);
+        let state = AppCaptureState::new(Arc::new(FixtureCaptureStore::from_engine(engine)));
+
+        let wire = state.read_viewport(0, 10).await.unwrap();
         assert!(wire.len() >= 16);
 
-        // Header: [total: u64 (8B)][returned: u32 (4B)][reserved: u32 (4B)]
         let total = u64::from_le_bytes(wire[0..8].try_into().unwrap());
         let returned = u32::from_le_bytes(wire[8..12].try_into().unwrap());
         assert_eq!(total, 3);
         assert_eq!(returned, 3);
 
-        // Inspect row 0
         let mut offset = 16;
         for i in 0..3 {
             let ts = u64::from_le_bytes(wire[offset..offset + 8].try_into().unwrap());
@@ -140,31 +100,31 @@ mod tests {
             offset = p_start + payload_len;
         }
 
-        // Test viewport slice: start_row = 1, row_count = 1
-        let slice_wire = fetch_viewport_binary(&engine, 1, 1);
+        let slice_wire = state.read_viewport(1, 1).await.unwrap();
         let slice_total = u64::from_le_bytes(slice_wire[0..8].try_into().unwrap());
         let slice_returned = u32::from_le_bytes(slice_wire[8..12].try_into().unwrap());
         assert_eq!(slice_total, 3);
         assert_eq!(slice_returned, 1);
 
         let slice_ep_id = u16::from_le_bytes(slice_wire[16 + 20..16 + 22].try_into().unwrap());
-        assert_eq!(slice_ep_id, 11); // Second packet
+        assert_eq!(slice_ep_id, 11);
     }
 
-    #[test]
-    fn test_fetch_viewport_binary_out_of_bounds() {
+    #[tokio::test]
+    async fn test_app_capture_state_out_of_bounds() {
         let dir = tempdir().unwrap();
         let engine = MmapCaptureEngine::create(dir.path(), 50, 4096).unwrap();
+        let state = AppCaptureState::new(Arc::new(FixtureCaptureStore::from_engine(engine)));
 
-        let wire = fetch_viewport_binary(&engine, 100, 10);
+        let wire = state.read_viewport(100, 10).await.unwrap();
         let total = u64::from_le_bytes(wire[0..8].try_into().unwrap());
         let returned = u32::from_le_bytes(wire[8..12].try_into().unwrap());
         assert_eq!(total, 0);
         assert_eq!(returned, 0);
     }
 
-    #[test]
-    fn test_fetch_viewport_binary_rejects_absurd_row_count_without_overallocating() {
+    #[tokio::test]
+    async fn test_app_capture_state_rejects_absurd_row_count_without_overallocating() {
         let dir = tempdir().unwrap();
         let mut engine = MmapCaptureEngine::create(dir.path(), 50, 4096).unwrap();
         for i in 0..3 {
@@ -176,20 +136,19 @@ mod tests {
                 payload: Bytes::from_static(b"X"),
             });
         }
+        let state = AppCaptureState::new(Arc::new(FixtureCaptureStore::from_engine(engine)));
 
-        // Before the clamp this asked for `16 + usize::MAX * 96` bytes (overflow / abort).
-        let wire = fetch_viewport_binary(&engine, 0, usize::MAX);
+        let wire = state.read_viewport(0, usize::MAX).await.unwrap();
         let returned = u32::from_le_bytes(wire[8..12].try_into().unwrap());
         assert_eq!(returned, 3);
 
-        // A wildly out-of-range start row must be handled without panicking either.
-        let wire = fetch_viewport_binary(&engine, u64::MAX, usize::MAX);
+        let wire = state.read_viewport(u64::MAX, usize::MAX).await.unwrap();
         let returned = u32::from_le_bytes(wire[8..12].try_into().unwrap());
         assert_eq!(returned, 0);
     }
 
-    #[test]
-    fn test_fetch_viewport_binary_clamps_to_max_rows() {
+    #[tokio::test]
+    async fn test_app_capture_state_clamps_to_max_rows() {
         let dir = tempdir().unwrap();
         let max_packets = MAX_VIEWPORT_ROWS as u64 + 100;
         let mut engine =
@@ -203,23 +162,24 @@ mod tests {
                 payload: Bytes::from_static(b"AB"),
             });
         }
+        let state = AppCaptureState::new(Arc::new(FixtureCaptureStore::from_engine(engine)));
 
-        let wire = fetch_viewport_binary(&engine, 0, usize::MAX);
+        let wire = state.read_viewport(0, usize::MAX).await.unwrap();
         let total = u64::from_le_bytes(wire[0..8].try_into().unwrap());
         let returned = u32::from_le_bytes(wire[8..12].try_into().unwrap());
         assert_eq!(total, max_packets);
         assert_eq!(returned, MAX_VIEWPORT_ROWS as u32);
     }
 
-    #[test]
-    fn test_app_capture_state_disconnected_surfaces_error() {
+    #[tokio::test]
+    async fn test_app_capture_state_disconnected_surfaces_error() {
         let state = AppCaptureState::disconnected("host capture store unavailable");
         assert_eq!(
-            state.read_viewport(0, 10).unwrap_err(),
+            state.read_viewport(0, 10).await.unwrap_err(),
             "host capture store unavailable"
         );
         assert_eq!(
-            state.status().unwrap_err(),
+            state.status().await.unwrap_err(),
             "host capture store unavailable"
         );
     }

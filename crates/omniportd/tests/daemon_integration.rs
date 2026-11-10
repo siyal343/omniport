@@ -1,3 +1,6 @@
+use bytes::Bytes;
+use omniport_capture::ViewportBatch;
+use omniport_core::{FrameFlags, PinState, SerialEvent};
 use omniport_proto::{RpcClient, SerialConfigDto};
 use omniportd::{DaemonEngine, run_server};
 use std::sync::Arc;
@@ -60,7 +63,28 @@ async fn test_daemon_client_rpc_roundtrip() {
     let eps_after = client.list_endpoints().await.unwrap();
     assert_eq!(eps_after.len(), 1);
 
-    // 7. Shutdown
+    // 7. Capture viewport & status roundtrip
+    engine
+        .record_event(&SerialEvent {
+            timestamp_ns: 42_000_000,
+            source_id: 2,
+            flags: FrameFlags::DIR_TX,
+            pins: PinState::RTS | PinState::DTR,
+            payload: Bytes::from_static(b"DAEMON_FRAME"),
+        })
+        .await;
+    let (total_packets, dropped_frames) = client.capture_status().await.unwrap();
+    assert_eq!(total_packets, 1);
+    assert_eq!(dropped_frames, 0);
+
+    let wire = client.read_viewport(0, 10).await.unwrap();
+    let batch = ViewportBatch::decode(&wire).unwrap();
+    assert_eq!(batch.total_packets(), 1);
+    assert_eq!(batch.returned_rows(), 1);
+    assert_eq!(batch.rows()[0].endpoint_id, 2);
+    assert_eq!(batch.rows()[0].payload, b"DAEMON_FRAME");
+
+    // 8. Shutdown
     client.shutdown().await.unwrap();
     server_handle.await.unwrap();
 }

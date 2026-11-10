@@ -54,6 +54,42 @@ proptest! {
             assert_eq!(decoded, resp);
         });
     }
+
+    #[test]
+    fn prop_viewport_and_status_codec_roundtrip(
+        start_row in any::<u64>(),
+        row_count in any::<u32>(),
+        total_packets in any::<u64>(),
+        dropped_frames in any::<u64>(),
+        bytes in proptest::collection::vec(any::<u8>(), 0..512),
+    ) {
+        let rt = tokio::runtime::Builder::new_current_thread().enable_all().build().unwrap();
+        rt.block_on(async {
+            let (mut client, mut server) = tokio::io::duplex(65536);
+
+            let req = Request::ReadViewport { start_row, row_count };
+            write_message(&mut client, &req).await.unwrap();
+            assert_eq!(read_message::<_, Request>(&mut server).await.unwrap(), req);
+
+            let resp = Response::ViewportBatch { bytes };
+            write_message(&mut server, &resp).await.unwrap();
+            assert_eq!(read_message::<_, Response>(&mut client).await.unwrap(), resp);
+
+            let status_req = Request::CaptureStatus;
+            write_message(&mut client, &status_req).await.unwrap();
+            assert_eq!(read_message::<_, Request>(&mut server).await.unwrap(), status_req);
+
+            let status_resp = Response::CaptureStatus {
+                total_packets,
+                dropped_frames,
+            };
+            write_message(&mut server, &status_resp).await.unwrap();
+            assert_eq!(
+                read_message::<_, Response>(&mut client).await.unwrap(),
+                status_resp
+            );
+        });
+    }
 }
 
 #[tokio::test]

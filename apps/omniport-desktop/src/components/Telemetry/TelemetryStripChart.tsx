@@ -2,7 +2,7 @@ import React, { useEffect, useMemo, useRef, useState } from "react";
 import uPlot from "uplot";
 import "uplot/dist/uPlot.min.css";
 import { TelemetryRingBuffer } from "./telemetryRingBuffer.ts";
-import { summarizeViewportRows } from "./telemetryFromRows.ts";
+import { EMPTY_TELEMETRY_SAMPLE, summarizeViewportRows } from "./telemetryFromRows.ts";
 import { type MonitorTheme, darkTheme } from "../../utils/theme.ts";
 import type { ViewportRowData } from "../../types/serial.ts";
 
@@ -14,8 +14,8 @@ export interface TelemetryStripChartProps {
   /** Frames fetched for the current viewport — the live telemetry source. */
   rows?: ViewportRowData[];
   /**
-   * True only for the browser demo stream (ipc/demoStream.ts). In demo mode the
-   * strip synthesizes a waveform but is clearly labelled as demo data.
+   * True only for the browser dev demo stream (`ipc/demoStream.ts`) so the
+   * strip clearly labels synthetic demo traffic.
    */
   isDemo?: boolean;
   /**
@@ -51,8 +51,8 @@ export const TelemetryStripChart: React.FC<TelemetryStripChartProps> = ({
   const uplotRef = useRef<uPlot | null>(null);
   const rowsRef = useRef<ViewportRowData[]>(rows);
   rowsRef.current = rows;
-  const isDemoRef = useRef(isDemo);
-  isDemoRef.current = isDemo;
+  const offlineRef = useRef(offline);
+  offlineRef.current = offline;
   const ringBuffer = useMemo(() => {
     const rb = new TelemetryRingBuffer(capacity);
     // Seed two finite points so uPlot has a valid x domain before the first tick.
@@ -179,11 +179,11 @@ export const TelemetryStripChart: React.FC<TelemetryStripChartProps> = ({
     ro.observe(container);
 
     // 60 Hz update loop. Paused while the tab is hidden so a backgrounded
-    // window does not keep synthesizing frames and repainting.
+    // window does not keep repainting. Metrics are always derived from fetched
+    // viewport rows (never synthesized via Math.random).
     let animId = 0;
     let lastNow = performance.now();
     let simSec = 0.016;
-    let lastUiUpdate = 0;
     let lastLiveSample = Number.NEGATIVE_INFINITY;
 
     const tick = (now: number) => {
@@ -193,31 +193,10 @@ export const TelemetryStripChart: React.FC<TelemetryStripChartProps> = ({
       if (!document.hidden) {
         simSec += Math.min(deltaSec, 0.25);
 
-        if (isDemoRef.current) {
-          // Demo mode only (browser fallback): periodic traffic bursts + jitter.
-          const burst = Math.sin(simSec * 1.5) > 0.3 ? 1.0 : 0.2;
-          const rate = 120 * burst + (Math.random() * 20 - 10);
-          const throughput = (rate * 96) / 1024; // KB/s
-          const jitter = Math.max(0, 2.5 + (Math.random() - 0.5) * 3);
-          const crc = Math.random() < 0.02 ? 1 : 0;
-
-          ringBuffer.push(simSec, rate, throughput, jitter, crc);
-
-          if (plot) {
-            // resetScales=true is required, otherwise the x domain freezes at
-            // the two seed samples and every later point is off-screen.
-            plot.setData(ringBuffer.getLinearData(), true);
-          }
-
-          if (now - lastUiUpdate > 250) {
-            setActiveRate(Math.round(rate));
-            setActiveThroughput(Number(throughput.toFixed(1)));
-            setActiveJitter(Number(jitter.toFixed(1)));
-            lastUiUpdate = now;
-          }
-        } else if (now - lastLiveSample >= LIVE_SAMPLE_INTERVAL_MS) {
-          // Live mode: sample the telemetry derived from real fetched frames.
-          const sample = summarizeViewportRows(rowsRef.current);
+        if (now - lastLiveSample >= LIVE_SAMPLE_INTERVAL_MS) {
+          const sample = offlineRef.current
+            ? EMPTY_TELEMETRY_SAMPLE
+            : summarizeViewportRows(rowsRef.current);
           ringBuffer.push(
             simSec,
             sample.packetRate,
@@ -226,6 +205,8 @@ export const TelemetryStripChart: React.FC<TelemetryStripChartProps> = ({
             sample.crcErrors
           );
           if (plot) {
+            // resetScales=true is required, otherwise the x domain freezes at
+            // the two seed samples and every later point is off-screen.
             plot.setData(ringBuffer.getLinearData(), true);
           }
           setActiveRate(Math.round(sample.packetRate));

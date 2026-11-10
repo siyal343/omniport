@@ -74,6 +74,11 @@ pub enum Request {
     RemoveRoute {
         route_id: u32,
     },
+    ReadViewport {
+        start_row: u64,
+        row_count: u32,
+    },
+    CaptureStatus,
     Shutdown,
 }
 
@@ -98,6 +103,14 @@ pub enum Response {
         route_id: u32,
         success: bool,
         message: String,
+    },
+    /// ICD §2 encoded binary viewport batch.
+    ViewportBatch {
+        bytes: Vec<u8>,
+    },
+    CaptureStatus {
+        total_packets: u64,
+        dropped_frames: u64,
     },
     Success {
         message: String,
