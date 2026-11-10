@@ -100,6 +100,20 @@ async fn test_pty_endpoint_stream_roundtrip_proptest() {
     #[cfg_attr(unix, allow(unused_mut))]
     let mut pty = PtyEndpoint::open(10, "test_vport", cfg, None).expect("open pty");
 
+    #[cfg(unix)]
+    {
+        // The real PTY path only needs provisioning on unix: opening it must expose
+        // the endpoint id/name and create the slave device node.
+        assert_eq!(pty.id(), 10);
+        assert_eq!(pty.name(), "test_vport");
+        assert!(
+            pty.slave_path().exists(),
+            "PTY slave {} was not created",
+            pty.slave_path().display()
+        );
+        drop(pty);
+    }
+
     #[cfg(not(unix))]
     {
         let mut slave = pty.take_mock_slave().expect("take slave");
