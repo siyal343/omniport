@@ -1,0 +1,99 @@
+name: CI
+
+on:
+  push:
+  pull_request:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  rust:
+    name: Rust workspace (windows)
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          components: rustfmt, clippy
+
+      - name: Cache cargo
+        uses: Swatinem/rust-cache@v2
+
+      - name: Format check
+        run: cargo fmt --all -- --check
+
+      - name: Clippy (deny warnings)
+        run: cargo clippy --workspace --all-targets --locked -- -D warnings
+
+      # Includes the ICD §2 golden-fixture contract test
+      # (crates/omniport-capture/tests/viewport_contract.rs).
+      - name: Workspace tests
+        run: cargo test --workspace --locked
+
+  desktop:
+    name: Desktop host + frontend (windows)
+    runs-on: windows-latest
+    env:
+      # Keep the desktop frontend artifact small on CI.
+      CI: "true"
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          components: rustfmt, clippy
+
+      - name: Cache cargo
+        uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: apps/omniport-desktop/src-tauri -> target
+
+      - name: Install Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+          cache-dependency-path: apps/omniport-desktop/package-lock.json
+
+      - name: Install frontend dependencies
+        working-directory: apps/omniport-desktop
+        run: npm ci
+
+      # Includes the TypeScript side of the golden viewport fixture contract
+      # (src/ipc/viewportDecoder.contract.test.js).
+      - name: Frontend tests
+        working-directory: apps/omniport-desktop
+        run: npm test
+
+      - name: Type check
+        working-directory: apps/omniport-desktop
+        run: npx tsc --noEmit
+
+      # `tauri build` embeds this directory; building it here also lets the
+      # Tauri host tests compile without the custom-protocol feature.
+      - name: Frontend production build
+        working-directory: apps/omniport-desktop
+        run: npx vite build
+
+      - name: Tauri host format check
+        working-directory: apps/omniport-desktop/src-tauri
+        run: cargo fmt --check
+
+      - name: Tauri host clippy (deny warnings)
+        working-directory: apps/omniport-desktop/src-tauri
+        run: cargo clippy --all-targets --locked -- -D warnings
+
+      - name: Tauri host tests
+        working-directory: apps/omniport-desktop/src-tauri
+        run: cargo test --locked
