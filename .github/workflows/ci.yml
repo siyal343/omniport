@@ -139,6 +139,13 @@ jobs:
             apps/omniport-desktop/src-tauri/target/release/bundle/nsis/*.exe
           if-no-files-found: error
 
+      - name: Upload packaged release binary (smoke debugging)
+        uses: actions/upload-artifact@v4
+        with:
+          name: omniport-release-binary
+          path: apps/omniport-desktop/src-tauri/target/release/omniport-desktop.exe
+          if-no-files-found: error
+
       - name: Smoke-launch packaged release binary (embedded frontend)
         working-directory: apps/omniport-desktop
         run: node scripts/smoke-packaged.mjs

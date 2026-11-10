@@ -43,15 +43,24 @@ function killTree(pid) {
 
 function processSnapshot() {
   try {
-    return execFileSync(
+    const processes = execFileSync(
       "powershell",
       [
         "-NoProfile",
         "-Command",
-        "Get-Process omniport-desktop,msedgewebview2 -ErrorAction SilentlyContinue | Select-Object Name,Id,MainWindowTitle | Format-Table -AutoSize | Out-String",
+        "Get-CimInstance Win32_Process | Where-Object { $_.Name -in @('omniport-desktop.exe','msedgewebview2.exe') } | Select-Object Name,ProcessId,CommandLine | Format-List | Out-String -Width 500",
       ],
       { encoding: "utf8" }
     ).trim();
+    let listeners = "netstat unavailable";
+    try {
+      listeners = execFileSync("cmd.exe", ["/c", `netstat -ano | findstr ${CDP_PORT}`], {
+        encoding: "utf8",
+      }).trim();
+    } catch {
+      listeners = `no listener on port ${CDP_PORT}`;
+    }
+    return `listeners:\n${listeners || "none"}\nprocesses:\n${processes}`;
   } catch (error) {
     return `process snapshot failed: ${error}`;
   }
