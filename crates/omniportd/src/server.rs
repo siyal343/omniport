@@ -313,7 +313,6 @@ async fn reject_overloaded(
     );
 }
 
-/// Re-exported so callers can size their buffers against the same limit.
 #[cfg(test)]
 mod tests {
     use super::*;
