@@ -4,6 +4,13 @@
 **Verification Criteria (VV_RTM.md):** Daemon-first control-plane architecture, headless daemon background service, typed RPC schema, and CLI headless runner  
 **Status:** COMPLETE (`[x]`)
 
+> **Superseded detail (2026-11-10, Step 6.5):** the
+> `crates/omniport-proto/proto/omniport.proto` file referenced in §1.1 (and its stale
+> root-level draft) was deleted. The authoritative control-plane schema is
+> `crates/omniport-proto/src/types.rs`, and the shipped transport — 4-byte big-endian
+> length-prefixed JSON over TCP — is specified in `docs/ICD.md` §3. The daemon-first
+> architecture and headless CLI described here remain current.
+
 ---
 
 ## 1. Scope & Implementation Details
