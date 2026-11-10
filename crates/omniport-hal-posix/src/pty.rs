@@ -363,7 +363,14 @@ mod tests {
         assert_eq!(pty.id(), 42);
         assert_eq!(pty.name(), "ttyV0");
         assert_eq!(pty.symlink_path(), Some(symlink_path.as_path()));
-        assert!(symlink_path.exists());
+        // `Path::exists()` follows the link. The mock target is `mock://pts/42`,
+        // which does not exist as a filesystem path, so existence must be checked
+        // on the link entry itself (symlink_metadata does not follow).
+        assert!(
+            std::fs::symlink_metadata(&symlink_path).is_ok(),
+            "symlink entry for {} was not created",
+            symlink_path.display()
+        );
 
         #[cfg(not(unix))]
         {
@@ -401,7 +408,11 @@ mod tests {
 
         // Test 4: Symlink cleanup on drop
         drop(pty);
-        assert!(!symlink_path.exists());
+        assert!(
+            std::fs::symlink_metadata(&symlink_path).is_err(),
+            "symlink entry for {} survived endpoint drop",
+            symlink_path.display()
+        );
     }
 
     #[tokio::test]
