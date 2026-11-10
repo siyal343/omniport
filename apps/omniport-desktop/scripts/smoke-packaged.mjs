@@ -41,9 +41,29 @@ function killTree(pid) {
   }
 }
 
-async function waitForHttp(url, timeoutMs = 30000) {
+function processSnapshot() {
+  try {
+    return execFileSync(
+      "powershell",
+      [
+        "-NoProfile",
+        "-Command",
+        "Get-Process omniport-desktop,msedgewebview2 -ErrorAction SilentlyContinue | Select-Object Name,Id,MainWindowTitle | Format-Table -AutoSize | Out-String",
+      ],
+      { encoding: "utf8" }
+    ).trim();
+  } catch (error) {
+    return `process snapshot failed: ${error}`;
+  }
+}
+
+async function waitForHttp(url, timeoutMs = 45000, exited = () => null) {
   const deadline = Date.now() + timeoutMs;
   while (Date.now() < deadline) {
+    const exit = exited();
+    if (exit) {
+      throw new Error(`application exited before serving CDP (${JSON.stringify(exit)})`);
+    }
     try {
       const response = await fetch(url);
       if (response.ok) return true;
@@ -55,8 +75,8 @@ async function waitForHttp(url, timeoutMs = 30000) {
   throw new Error(`CDP endpoint ${url} did not respond within ${timeoutMs}ms`);
 }
 
-async function connectWebView() {
-  await waitForHttp(`http://127.0.0.1:${CDP_PORT}/json/version`);
+async function connectWebView(exited) {
+  await waitForHttp(`http://127.0.0.1:${CDP_PORT}/json/version`, 45000, exited);
   const browser = await chromium.connectOverCDP(`http://127.0.0.1:${CDP_PORT}`);
   const deadline = Date.now() + 20000;
   while (Date.now() < deadline) {
@@ -112,7 +132,26 @@ try {
   env.WEBVIEW2_ADDITIONAL_BROWSER_ARGUMENTS = `--remote-debugging-port=${CDP_PORT}`;
 
   appProc = spawn(RELEASE_EXE, [], { env, stdio: ["ignore", "pipe", "pipe"] });
-  const { browser, page } = await connectWebView();
+  let appExit = null;
+  let appOutput = "";
+  appProc.on("exit", (code, signal) => {
+    appExit = { code, signal };
+  });
+  appProc.stdout?.on("data", (chunk) => {
+    appOutput += chunk.toString();
+  });
+  appProc.stderr?.on("data", (chunk) => {
+    appOutput += chunk.toString();
+  });
+
+  const { browser, page } = await connectWebView(() => appExit).catch((error) => {
+    console.error(`--- smoke launch diagnostics`);
+    console.error(`spawned pid: ${appProc.pid}`);
+    console.error(`exit: ${JSON.stringify(appExit)}`);
+    console.error(`output:\n${appOutput}`);
+    console.error(`processes:\n${processSnapshot()}`);
+    throw error;
+  });
   const consoleErrors = [];
   page.on("console", (message) => {
     if (message.type() === "error") consoleErrors.push(message.text());
