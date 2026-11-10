@@ -20,6 +20,7 @@ Everything a contributor (human or agent) needs to know *what* OmniPort must do 
 | :--- | :--- |
 | [SRS.md](SRS.md) | Functional requirements (FR-*) and non-functional requirements (NFR-*) |
 | [ICD.md](ICD.md) | Interface control: dual-mmap index layout, pin/flag bit tables, Tauri viewport wire format, daemon control-plane transport |
+| [SCENARIO.md](SCENARIO.md) | Declarative CI scenario contract: schema, supported endpoint types, validation rules, pin assertions and report format |
 | [VV_RTM.md](VV_RTM.md) | Verification plan and requirements traceability matrix |
 | [adr/](adr/) | Architecture decision records, one decision per file |
 
