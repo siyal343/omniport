@@ -64,6 +64,26 @@ jobs:
       - name: Workspace tests (unix backends)
         run: cargo test --workspace --locked
 
+  # Supply-chain policy: RustSec advisories (cargo-audit) plus license/bans/source
+  # checks (cargo-deny, configuration in deny.toml).
+  security:
+    name: Supply chain (audit + licenses)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      # Prebuilt binaries; avoids a multi-minute cargo install on every push.
+      - name: Install cargo-audit and cargo-deny
+        uses: taiki-e/install-action@v2
+        with:
+          tool: cargo-audit,cargo-deny
+
+      - name: RustSec advisory scan
+        run: cargo audit
+
+      - name: License, bans and source policy
+        run: cargo deny check
+
   # Release-mode NFR harnesses (ignored by the default debug suite). Thresholds
   # and recorded baselines live in docs/VV_RTM.md; failures print measured vs target.
   perf:

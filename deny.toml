@@ -1,0 +1,49 @@
+# cargo-deny configuration — supply-chain policy for the OmniPort workspace.
+# CI runs `cargo deny check` (advisories, bans, licenses, sources) in the
+# `security` job. Keep this list in sync with ADR-0006 (Apache-2.0) and the
+# dependency graph; additions need a reason in the PR/commit message.
+
+[graph]
+all-features = true
+
+[advisories]
+version = 2
+# A yanked crate is not automatically a vulnerability, but the workspace pins
+# exact versions through Cargo.lock; yanked entries must be upgraded explicitly.
+yanked = "deny"
+ignore = []
+
+[licenses]
+version = 2
+# Permissive licenses used by the workspace dependency tree
+# (generated from `cargo metadata` license expressions, 2026-11-11).
+allow = [
+    "MIT",
+    "Apache-2.0",
+    "Apache-2.0 WITH LLVM-exception",
+    "BSD-3-Clause",
+    "ISC",
+    "Unicode-3.0",
+    "Unlicense",
+    "Zlib",
+    "BSL-1.0",
+]
+# Any dependency whose license is not in `allow` fails CI rather than being
+# silently vendored. Add time-limited exceptions here with an expiry comment.
+exceptions = []
+confidence-threshold = 0.9
+
+[bans]
+multiple-versions = "warn"
+# Workspace-internal `{ path = "..." }` dependencies intentionally have no
+# version requirement; Cargo.lock still pins every external dependency, and
+# `cargo deny check sources` rejects unknown registries/git sources.
+wildcards = "warn"
+highlight = "all"
+deny = []
+
+[sources]
+unknown-registry = "deny"
+unknown-git = "deny"
+allow-registry = ["https://github.com/rust-lang/crates.io-index"]
+allow-git = []
