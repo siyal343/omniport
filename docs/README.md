@@ -11,8 +11,8 @@ Everything a contributor (human or agent) needs to know *what* OmniPort must do 
 - **[AUDIT_2026-11-10.md](AUDIT_2026-11-10.md)** — audit snapshot: every defect found
   and fixed, the architecture review outcome, GUI test evidence, verification
   results, and the documented known gaps.
-- **[README.md](../README.md)** — project-level overview (if present) and workspace
-  commands.
+- **[AGENTS.md](../AGENTS.md)** — repository operating manual: architectural
+  invariants, verification policy, workspace commands and the step protocol.
 
 ## Engineering specifications (normative)
 
