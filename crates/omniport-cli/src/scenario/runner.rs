@@ -69,8 +69,8 @@ impl ScenarioRunner {
     /// Parses scenario configuration from a YAML string
     pub fn from_yaml(yaml_str: &str) -> Result<Self, ScenarioError> {
         super::validate::validate_raw_step_keys(yaml_str).map_err(ScenarioError::ParseError)?;
-        let config: ScenarioConfig =
-            serde_yaml::from_str(yaml_str).map_err(|e| ScenarioError::ParseError(e.to_string()))?;
+        let config: ScenarioConfig = serde_norway::from_str(yaml_str)
+            .map_err(|e| ScenarioError::ParseError(e.to_string()))?;
         Self::new(config)
     }
 

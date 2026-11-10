@@ -266,8 +266,8 @@ pub(crate) fn validate_scenario(config: &ScenarioConfig) -> Result<(), ScenarioE
 /// `deny_unknown_fields`; without this check a typo such as `timeout: 500`
 /// would be silently ignored and the step would run with the default.
 pub(crate) fn validate_raw_step_keys(yaml: &str) -> Result<(), String> {
-    let value: serde_yaml::Value =
-        serde_yaml::from_str(yaml).map_err(|e| format!("invalid YAML: {e}"))?;
+    let value: serde_norway::Value =
+        serde_norway::from_str(yaml).map_err(|e| format!("invalid YAML: {e}"))?;
     let Some(steps) = value.get("steps").and_then(|steps| steps.as_sequence()) else {
         return Ok(());
     };
@@ -277,7 +277,7 @@ pub(crate) fn validate_raw_step_keys(yaml: &str) -> Result<(), String> {
         let mapping = step
             .as_mapping()
             .ok_or_else(|| format!("{label}: every step must be a mapping"))?;
-        let action_key = serde_yaml::Value::String("action".to_string());
+        let action_key = serde_norway::Value::String("action".to_string());
         let action = mapping
             .get(&action_key)
             .and_then(|action| action.as_str())
