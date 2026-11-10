@@ -16,7 +16,13 @@ export const TelemetryStripChart: React.FC<TelemetryStripChartProps> = ({
 }) => {
   const containerRef = useRef<HTMLDivElement>(null);
   const uplotRef = useRef<uPlot | null>(null);
-  const ringBufferRef = useRef<TelemetryRingBuffer>(new TelemetryRingBuffer(capacity));
+  const ringBufferRef = useRef<TelemetryRingBuffer | null>(null);
+  if (!ringBufferRef.current) {
+    const rb = new TelemetryRingBuffer(capacity);
+    rb.push(0, 0, 0, 0, 0);
+    rb.push(0.016, 0, 0, 0, 0);
+    ringBufferRef.current = rb;
+  }
   const [activeRate, setActiveRate] = useState(0);
   const [activeThroughput, setActiveThroughput] = useState(0);
 
@@ -24,12 +30,12 @@ export const TelemetryStripChart: React.FC<TelemetryStripChartProps> = ({
     const container = containerRef.current;
     if (!container) return;
 
-    const ring = ringBufferRef.current;
+    const ring = ringBufferRef.current!;
     const initialData = ring.getLinearData();
 
     const opts: uPlot.Options = {
-      width: container.clientWidth || 800,
-      height: height - 36, // Subtract top stat header
+      width: Math.max(container.clientWidth || 800, 200),
+      height: Math.max(height - 36, 100), // Subtract top stat header
       cursor: {
         sync: { key: "omniport" },
         drag: { setScale: false },
@@ -99,13 +105,18 @@ export const TelemetryStripChart: React.FC<TelemetryStripChartProps> = ({
       ],
     };
 
-    const plot = new uPlot(opts, initialData, container);
-    uplotRef.current = plot;
+    let plot: uPlot | null = null;
+    try {
+      plot = new uPlot(opts, initialData, container);
+      uplotRef.current = plot;
+    } catch (err) {
+      console.warn("uPlot initialization deferred:", err);
+    }
 
     const ro = new ResizeObserver((entries) => {
       for (const entry of entries) {
         const w = entry.contentRect.width;
-        if (w > 0) {
+        if (w > 0 && plot) {
           plot.setSize({ width: Math.floor(w), height: height - 36 });
         }
       }
@@ -149,7 +160,7 @@ export const TelemetryStripChart: React.FC<TelemetryStripChartProps> = ({
     return () => {
       cancelAnimationFrame(animId);
       ro.disconnect();
-      plot.destroy();
+      plot?.destroy();
       uplotRef.current = null;
     };
   }, [height, capacity, isDark]);
