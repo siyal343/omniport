@@ -17,8 +17,7 @@ endpoints:
     baud_rate: 115200
 
 routes:
-  - id: 101
-    source: 1
+  - source: 1
     targets: [2]
     bidirectional: true
     fault:

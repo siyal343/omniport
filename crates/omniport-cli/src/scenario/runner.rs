@@ -1,5 +1,6 @@
 use super::error::ScenarioError;
 use super::schema::{EndpointType, FaultConfigDto, ScenarioConfig, StepConfig};
+use super::validate::validate_scenario;
 use crate::hex_utils::{decode_hex, hex_matches};
 use bytes::Bytes;
 use omniport_capture::pcapng::PcapngWriter;
@@ -67,6 +68,7 @@ impl ScenarioRunner {
 
     /// Parses scenario configuration from a YAML string
     pub fn from_yaml(yaml_str: &str) -> Result<Self, ScenarioError> {
+        super::validate::validate_raw_step_keys(yaml_str).map_err(ScenarioError::ParseError)?;
         let config: ScenarioConfig =
             serde_yaml::from_str(yaml_str).map_err(|e| ScenarioError::ParseError(e.to_string()))?;
         Self::new(config)
@@ -74,6 +76,7 @@ impl ScenarioRunner {
 
     /// Creates and initializes a new scenario runner with all endpoints and routes
     pub fn new(config: ScenarioConfig) -> Result<Self, ScenarioError> {
+        validate_scenario(&config)?;
         let mut topology = Topology::new();
         let pin_states = Arc::new(Mutex::new(HashMap::new()));
         let mut pending_scripts: Vec<(EndpointId, ScriptEndpoint)> = Vec::new();
@@ -131,7 +134,14 @@ impl ScenarioRunner {
                     pending_scripts.push((ep.id, script_ep));
                 }
                 EndpointType::TcpServer | EndpointType::TcpClient | EndpointType::Udp => {
-                    // Network endpoints can be wired when live network testing is configured
+                    // Defence in depth: `validate_scenario` already rejects these.
+                    return Err(ScenarioError::ConfigError(format!(
+                        "Endpoint '{}' ({}) uses unsupported type '{}'; the scenario runner only \
+                         supports 'mock' and 'script' endpoints",
+                        ep.name,
+                        ep.id,
+                        endpoint_type_name(ep.endpoint_type)
+                    )));
                 }
             }
         }
@@ -177,6 +187,7 @@ impl ScenarioRunner {
                 script_ep,
                 ep_id,
                 Arc::clone(&router),
+                Arc::clone(&pin_states),
                 cancel_rx,
             ));
         }
@@ -449,7 +460,7 @@ impl ScenarioRunner {
 
             StepConfig::AssertPins {
                 endpoint,
-                timeout_ms: _,
+                timeout_ms,
                 rts,
                 cts,
                 dtr,
@@ -457,74 +468,29 @@ impl ScenarioRunner {
                 dcd,
                 ri,
             } => {
-                let desc = format!("Assert pins on ep {endpoint}");
+                let desc = format!("Assert pins on ep {endpoint} (timeout: {timeout_ms}ms)");
                 if let Err(e) = self.ensure_endpoint(*endpoint) {
                     return ("assert_pins".into(), desc, Err(e));
                 }
-                let current = self.get_pins(*endpoint);
-                let mut mismatches = Vec::new();
-
-                if let Some(expected) = rts {
-                    if current.contains(PinState::RTS) != *expected {
-                        mismatches.push(format!(
-                            "RTS (expected {expected}, got {})",
-                            current.contains(PinState::RTS)
-                        ));
+                let deadline = Instant::now() + Duration::from_millis(*timeout_ms);
+                loop {
+                    let current = self.get_pins(*endpoint);
+                    let mismatches =
+                        pin_assert_mismatches(current, *rts, *cts, *dtr, *dsr, *dcd, *ri);
+                    if mismatches.is_empty() {
+                        return ("assert_pins".into(), desc, Ok(()));
                     }
-                }
-                if let Some(expected) = cts {
-                    if current.contains(PinState::CTS) != *expected {
-                        mismatches.push(format!(
-                            "CTS (expected {expected}, got {})",
-                            current.contains(PinState::CTS)
-                        ));
+                    if Instant::now() >= deadline {
+                        return (
+                            "assert_pins".into(),
+                            desc,
+                            Err(ScenarioError::AssertionFailed(format!(
+                                "Pin assertion failed on endpoint {endpoint} after waiting {timeout_ms}ms: {}",
+                                mismatches.join(", ")
+                            ))),
+                        );
                     }
-                }
-                if let Some(expected) = dtr {
-                    if current.contains(PinState::DTR) != *expected {
-                        mismatches.push(format!(
-                            "DTR (expected {expected}, got {})",
-                            current.contains(PinState::DTR)
-                        ));
-                    }
-                }
-                if let Some(expected) = dsr {
-                    if current.contains(PinState::DSR) != *expected {
-                        mismatches.push(format!(
-                            "DSR (expected {expected}, got {})",
-                            current.contains(PinState::DSR)
-                        ));
-                    }
-                }
-                if let Some(expected) = dcd {
-                    if current.contains(PinState::DCD) != *expected {
-                        mismatches.push(format!(
-                            "DCD (expected {expected}, got {})",
-                            current.contains(PinState::DCD)
-                        ));
-                    }
-                }
-                if let Some(expected) = ri {
-                    if current.contains(PinState::RI) != *expected {
-                        mismatches.push(format!(
-                            "RI (expected {expected}, got {})",
-                            current.contains(PinState::RI)
-                        ));
-                    }
-                }
-
-                let desc = format!("Assert pins on ep {endpoint}");
-                if mismatches.is_empty() {
-                    ("assert_pins".into(), desc, Ok(()))
-                } else {
-                    (
-                        "assert_pins".into(),
-                        desc,
-                        Err(ScenarioError::AssertionFailed(format!(
-                            "Pin assertion failed on endpoint {endpoint}: {}",
-                            mismatches.join(", ")
-                        ))),
-                    )
+                    tokio::time::sleep(PIN_ASSERT_POLL_INTERVAL).await;
                 }
             }
 
@@ -589,6 +555,37 @@ impl ScenarioRunner {
         let mut guard = self.pin_states.lock().unwrap_or_else(|e| e.into_inner());
         guard.insert(ep_id, pins);
     }
+}
+
+/// How often `assert_pins` re-reads the tracked pin state while waiting for it
+/// to match the expectation.
+const PIN_ASSERT_POLL_INTERVAL: Duration = Duration::from_millis(10);
+
+fn pin_assert_mismatches(
+    current: PinState,
+    rts: Option<bool>,
+    cts: Option<bool>,
+    dtr: Option<bool>,
+    dsr: Option<bool>,
+    dcd: Option<bool>,
+    ri: Option<bool>,
+) -> Vec<String> {
+    let expectations = [
+        ("RTS", PinState::RTS, rts),
+        ("CTS", PinState::CTS, cts),
+        ("DTR", PinState::DTR, dtr),
+        ("DSR", PinState::DSR, dsr),
+        ("DCD", PinState::DCD, dcd),
+        ("RI", PinState::RI, ri),
+    ];
+    expectations
+        .into_iter()
+        .filter_map(|(name, mask, expected)| {
+            let expected = expected?;
+            let actual = current.contains(mask);
+            (actual != expected).then(|| format!("{name} (expected {expected}, got {actual})"))
+        })
+        .collect()
 }
 
 fn endpoint_type_name(kind: EndpointType) -> &'static str {
@@ -663,6 +660,7 @@ fn spawn_endpoint_bridge<E: AsyncEndpoint>(
     mut endpoint: E,
     ep_id: EndpointId,
     router: Arc<RoutingGraph>,
+    pin_states: Arc<Mutex<HashMap<EndpointId, PinState>>>,
     mut cancel_rx: tokio::sync::oneshot::Receiver<()>,
 ) -> JoinHandle<()> {
     tokio::spawn(async move {
@@ -682,6 +680,12 @@ fn spawn_endpoint_bridge<E: AsyncEndpoint>(
                 ep_res = endpoint.recv() => {
                     match ep_res {
                         Ok(evt) => {
+                            // Script endpoints report their current pin snapshot on every
+                            // outbound event; mirror it so `assert_pins` can observe
+                            // asynchronously applied pins instead of only local `set_pins`.
+                            if let Ok(mut guard) = pin_states.lock() {
+                                guard.insert(ep_id, evt.pins);
+                            }
                             let _ = router.route(evt);
                         }
                         Err(_) => break,

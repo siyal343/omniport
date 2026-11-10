@@ -1,6 +1,7 @@
 use serde::{Deserialize, Serialize};
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct ScenarioConfig {
     #[serde(default = "default_version")]
     pub version: String,
@@ -32,6 +33,7 @@ pub enum EndpointType {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct EndpointConfig {
     pub id: u16,
     pub name: String,
@@ -52,6 +54,7 @@ fn default_baud_rate() -> u32 {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct RouteConfig {
     #[serde(default)]
     pub id: u32,
@@ -64,6 +67,7 @@ pub struct RouteConfig {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
+#[serde(deny_unknown_fields)]
 pub struct FaultConfigDto {
     #[serde(default)]
     pub drop_rate: f64,
@@ -78,6 +82,7 @@ pub struct FaultConfigDto {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct CaptureConfig {
     #[serde(default = "default_true")]
     pub enabled: bool,

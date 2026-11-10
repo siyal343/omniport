@@ -20,8 +20,7 @@ endpoints:
     baud_rate: 115200
 
 routes:
-  - id: 1
-    source: 1
+  - source: 1
     targets: [2]
     bidirectional: false
 
@@ -100,8 +99,7 @@ endpoints:
     baud_rate: 115200
 
 routes:
-  - id: 1
-    source: 1
+  - source: 1
     targets: [2]
     bidirectional: true
 
@@ -140,8 +138,7 @@ endpoints:
     type: "mock"
 
 routes:
-  - id: 1
-    source: 1
+  - source: 1
     targets: [2]
     bidirectional: false
     fault:
@@ -193,8 +190,7 @@ endpoints:
     type: "mock"
 
 routes:
-  - id: 1
-    source: 1
+  - source: 1
     targets: [2]
 
 capture:
@@ -245,8 +241,7 @@ endpoints:
     type: "mock"
 
 routes:
-  - id: 1
-    source: 1
+  - source: 1
     targets: [2]
     fault:
       drop_rate: 1.0
@@ -289,8 +284,7 @@ endpoints:
     type: "mock"
 
 routes:
-  - id: 1
-    source: 1
+  - source: 1
     targets: [2]
     fault:
       drop_rate: 0.0
@@ -327,8 +321,7 @@ endpoints:
     type: "mock"
 
 routes:
-  - id: 1
-    source: 1
+  - source: 1
     targets: [2]
     fault:
       drop_rate: 0.5
@@ -360,8 +353,7 @@ endpoints:
     name: "receiver"
     type: "mock"
 routes:
-  - id: 1
-    source: 1
+  - source: 1
     targets: [2]
     fault:
       {field}: 1.5
@@ -381,7 +373,8 @@ routes:
 #[tokio::test]
 async fn test_steps_referencing_undeclared_endpoints_fail_loudly() {
     // A typo in the step endpoint used to be a silent no-op: `send` routed to
-    // zero destinations and the scenario reported PASS.
+    // zero destinations and the scenario reported PASS. It is now rejected at
+    // load time, before any step runs.
     let yaml = r#"
 version: "1.0"
 name: "Undeclared Endpoint Scenario"
@@ -397,12 +390,13 @@ steps:
     payload_text: "LOST"
 "#;
 
-    let mut runner = ScenarioRunner::from_yaml(yaml).expect("scenario should parse");
-    let report = runner.run().await;
-    assert!(!report.success, "send to undeclared endpoint must fail");
+    let err = match ScenarioRunner::from_yaml(yaml) {
+        Ok(_) => panic!("undeclared step endpoint must be rejected at load time"),
+        Err(err) => err,
+    };
     assert!(
-        report.error.unwrap().contains("undeclared endpoint 99"),
-        "error should identify the undeclared endpoint"
+        err.to_string().contains("endpoint 99 is not declared"),
+        "error should identify the undeclared endpoint: {err}"
     );
 }
 
@@ -422,8 +416,7 @@ endpoints:
     type: "mock"
 
 routes:
-  - id: 1
-    source: 1
+  - source: 1
     targets: [2]
 
 steps:
