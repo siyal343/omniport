@@ -8,7 +8,7 @@ use std::time::Duration;
 
 const FIXTURE_MAX_PACKETS: u64 = 100_000;
 const FIXTURE_MAX_DATA_BYTES: u64 = 16 * 1024 * 1024;
-const DAEMON_CONNECT_TIMEOUT: Duration = Duration::from_secs(2);
+pub(crate) const DAEMON_CONNECT_TIMEOUT: Duration = Duration::from_secs(2);
 pub const DEFAULT_DAEMON_ADDR: &str = "127.0.0.1:50051";
 
 /// Non-viewport metadata the frontend needs to describe the capture it is reading.
