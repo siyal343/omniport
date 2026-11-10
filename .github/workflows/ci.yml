@@ -64,6 +64,26 @@ jobs:
       - name: Workspace tests (unix backends)
         run: cargo test --workspace --locked
 
+  # Release-mode NFR harnesses (ignored by the default debug suite). Thresholds
+  # and recorded baselines live in docs/VV_RTM.md; failures print measured vs target.
+  perf:
+    name: Performance NFR harness (windows, release)
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Cache cargo
+        uses: Swatinem/rust-cache@v2
+
+      - name: NFR-101/102 forwarding latency + 32-pair throughput
+        run: cargo test --release -p omniport-core --test nfr_perf --locked -- --ignored --nocapture
+
+      - name: NFR-103 desktop memory over a 10 GB capture
+        run: cargo test --release -p omniport-capture --test nfr_memory --locked -- --ignored --nocapture
+
   desktop:
     name: Desktop host + frontend (windows)
     runs-on: windows-latest

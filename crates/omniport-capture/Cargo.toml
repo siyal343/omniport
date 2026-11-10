@@ -16,3 +16,6 @@ omniport-core = { path = "../omniport-core" }
 tempfile.workspace = true
 proptest.workspace = true
 serde_json.workspace = true
+
+[target.'cfg(windows)'.dev-dependencies]
+windows-sys = { version = "0.61", features = ["Win32_Foundation", "Win32_System_ProcessStatus", "Win32_System_Threading"] }
