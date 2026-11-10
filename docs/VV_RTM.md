@@ -8,6 +8,34 @@
 | FR-401 | `omniport-capture` | Benchmark + Unit | $O(1)$ viewport seek < 100 us at 50M packets |
 | FR-402 | `omniport-dissect` | Unit + Fuzz Test | Decoded fields match packed C reference |
 | FR-403, NFR-105 | `omniport-script` | Unit + Property Fuzzing | Instruction fuel abort <= 1 ms; bounded VM heap & `serial.send` |
+| NFR-101 | `omniport-core` | Benchmark (release, `perf` CI job) | Loopback 64-byte forwarding p99 < 500 us |
+| NFR-102 | `omniport-core` | Benchmark (release, `perf` CI job) | >= 12 Mbps across 32 pairs, zero dropped bytes |
+| NFR-103 | `omniport-capture` | Memory harness (release, `perf` CI job) | Desktop RSS < 250 MB while a 10 GB capture is mapped |
+| NFR-104 | `omniport-desktop` | Frame-budget test (`npm test`) | Per-frame data-path p95 <= 16.6 ms (60 FPS) |
+
+## Step 7.4 Performance / NFR Verification Status
+
+The `perf` CI job (`.github/workflows/ci.yml`, `windows-latest`, release profile) runs the
+Rust harnesses explicitly with `--ignored --nocapture`; the desktop frame-budget test runs
+inside the `desktop` job's `npm test`. Every harness prints the measured value next to its
+target before asserting, so a failure shows the regression.
+
+| Req ID | Harness | Threshold | Recorded baseline (2026-11-11, Windows 10 Pro, rustc 1.99.0, release) |
+| :--- | :--- | :--- | :--- |
+| NFR-101 | `crates/omniport-core/tests/nfr_perf.rs` | p99 < 500 us for 64-byte frames | p50 0.20 us, p99 0.30 us, max 2.03 ms outlier over 20,000 samples |
+| NFR-102 | `crates/omniport-core/tests/nfr_perf.rs` | >= 12 Mbps over 32 pairs, zero dropped bytes | 34.6 Gbps (65,536,000 bytes / 64,000 frames in 15.17 ms), 0 dropped |
+| NFR-103 | `crates/omniport-capture/tests/nfr_memory.rs` | RSS < 250 MB with a 10 GiB capture mapped | RSS 20.7 MiB after mapping 14,080 MiB (10 GiB data + ~3.9 GiB index); delta 16.9 MiB after 200,000 appended frames |
+| NFR-104 | `apps/omniport-desktop/src/perf/frameBudget.test.js` | p95 data-path frame cost <= 16.6 ms | avg 0.263 ms, p95 0.522 ms, max 3.953 ms over 240 frames (decode 200 rows + hex draw-call emission + telemetry ingest) |
+
+Notes:
+
+- NFR-103 creates sparse capture files, so CI maps the same virtual footprint as a real 10 GB
+  session without writing 10 GB; 200,000 appended frames exercise the used pages only.
+- NFR-104 is a deterministic CPU-data-path budget (decode + canvas call emission + telemetry
+  ingest). GPU/compositor frame pacing is not measurable in headless CI; the end-to-end
+  60 FPS display claim remains covered by the manual WebView2 pass (`docs/AUDIT_2026-11-10.md` §5).
+- The first CI `perf` run re-records these numbers on `windows-latest`; baselines above come from
+  the local release run used to validate the harnesses.
 
 ## Step 6.6 Platform & Protocol Verification Status
 
