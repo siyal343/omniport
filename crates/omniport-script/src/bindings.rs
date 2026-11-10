@@ -29,12 +29,24 @@ impl HostBridge {
     }
 
     pub fn drain_outbound(&self) -> Vec<Bytes> {
-        let mut queue = self.outbound_queue.lock().unwrap();
+        let mut queue = self
+            .outbound_queue
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
         std::mem::take(&mut *queue)
     }
 
+    /// Discards queued output (used when a callback fails part-way through).
+    pub fn clear_outbound(&self) {
+        let mut queue = self
+            .outbound_queue
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
+        queue.clear();
+    }
+
     pub fn drain_logs(&self) -> Vec<String> {
-        let mut logs = self.log_messages.lock().unwrap();
+        let mut logs = self.log_messages.lock().unwrap_or_else(|e| e.into_inner());
         std::mem::take(&mut *logs)
     }
 
@@ -60,7 +72,7 @@ impl HostBridge {
                 _ => {
                     return Err(mlua::Error::RuntimeError(
                         "serial.send() requires string or byte table".into(),
-                    ))
+                    ));
                 }
             };
             queue.lock().unwrap().push(bytes);
@@ -69,26 +81,33 @@ impl HostBridge {
         serial.set("send", send_fn)?;
 
         // 2. serial.set_pins(table)
+        type PinSetter = fn(&mut PinState, bool);
         let pins_out = self.pins_state.clone();
         let set_pins_fn = lua.create_function(move |_lua, t: Table| {
             let mut state = PinState::from_bits_truncate(pins_out.load(Ordering::Acquire));
-            if let Ok(v) = t.get::<bool>("rts") {
-                state.set(PinState::RTS, v);
-            }
-            if let Ok(v) = t.get::<bool>("cts") {
-                state.set(PinState::CTS, v);
-            }
-            if let Ok(v) = t.get::<bool>("dtr") {
-                state.set(PinState::DTR, v);
-            }
-            if let Ok(v) = t.get::<bool>("dsr") {
-                state.set(PinState::DSR, v);
-            }
-            if let Ok(v) = t.get::<bool>("dcd") {
-                state.set(PinState::DCD, v);
-            }
-            if let Ok(v) = t.get::<bool>("ri") {
-                state.set(PinState::RI, v);
+            // mlua's `bool` conversion applies Lua truthiness (any non-nil,
+            // non-false value becomes true), so match on `Value` explicitly:
+            // a bogus type is a script bug that must be reported, not silently
+            // coerced.
+            let fields: [(&str, PinSetter); 6] = [
+                ("rts", |s, v| s.set(PinState::RTS, v)),
+                ("cts", |s, v| s.set(PinState::CTS, v)),
+                ("dtr", |s, v| s.set(PinState::DTR, v)),
+                ("dsr", |s, v| s.set(PinState::DSR, v)),
+                ("dcd", |s, v| s.set(PinState::DCD, v)),
+                ("ri", |s, v| s.set(PinState::RI, v)),
+            ];
+            for (name, set) in fields {
+                match t.get::<Value>(name)? {
+                    Value::Nil => {}
+                    Value::Boolean(value) => set(&mut state, value),
+                    other => {
+                        return Err(mlua::Error::RuntimeError(format!(
+                            "serial.set_pins: field '{name}' must be a boolean, got {}",
+                            other.type_name()
+                        )));
+                    }
+                }
             }
             pins_out.store(state.bits(), Ordering::Release);
             Ok(())
@@ -153,7 +172,9 @@ mod tests {
         assert_eq!(&outbound[0][..], b"HELLO_LUA");
 
         // 2. Test table send
-        lua.load("serial.send({ 0xAA, 0xBB, 0xCC })").exec().unwrap();
+        lua.load("serial.send({ 0xAA, 0xBB, 0xCC })")
+            .exec()
+            .unwrap();
         let outbound2 = bridge.drain_outbound();
         assert_eq!(outbound2.len(), 1);
         assert_eq!(&outbound2[0][..], &[0xAA, 0xBB, 0xCC]);

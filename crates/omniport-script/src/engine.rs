@@ -2,9 +2,9 @@ use bytes::Bytes;
 use mlua::{Function, Lua};
 use omniport_core::PinState;
 
-use crate::bindings::{pin_state_to_lua, HostBridge};
+use crate::bindings::{HostBridge, pin_state_to_lua};
 use crate::error::{Result, ScriptError};
-use crate::fuel::{FuelMeter, DEFAULT_CHECK_INTERVAL, DEFAULT_MAX_FUEL};
+use crate::fuel::{DEFAULT_CHECK_INTERVAL, DEFAULT_MAX_FUEL, FuelMeter};
 use crate::sandbox::apply_sandbox;
 
 #[derive(Debug, Clone)]
@@ -61,13 +61,49 @@ impl ScriptEngine {
         let globals = self.lua.globals();
         if let Ok(on_init) = globals.get::<Function>("on_init") {
             self.fuel.reset();
-            on_init.call::<()>(()).map_err(|e| ScriptError::CallbackError {
-                callback: "on_init".into(),
-                reason: e.to_string(),
-            })?;
+            let result = on_init.call::<()>(());
+            self.finish_callback(result, "on_init")?;
         }
 
         Ok(())
+    }
+
+    /// Converts an `mlua` error into the precise `ScriptError` variant.
+    ///
+    /// Fuel exhaustion is raised from the instruction hook as a runtime error;
+    /// it must be surfaced as `FuelExceeded` for every callback (including
+    /// `on_init`, `on_timer` and `on_pin_change`), not just `on_rx`.
+    fn map_callback_error(&self, callback: &'static str, err: mlua::Error) -> ScriptError {
+        if err.to_string().contains("FuelExceeded") {
+            ScriptError::FuelExceeded {
+                consumed: self.fuel.consumed_instructions(),
+                limit: self.fuel.max_fuel(),
+            }
+        } else {
+            ScriptError::CallbackError {
+                callback: callback.to_string(),
+                reason: err.to_string(),
+            }
+        }
+    }
+
+    /// Drains the output queue after a successful callback.
+    ///
+    /// If the callback failed part-way through, any bytes it already queued are
+    /// discarded: otherwise a half-written frame would leak into the next
+    /// dispatch (stale/partial writes on the wire).
+    fn finish_callback(
+        &mut self,
+        result: mlua::Result<()>,
+        callback: &'static str,
+    ) -> Result<Vec<Bytes>> {
+        match result {
+            Ok(()) => Ok(self.bridge.drain_outbound()),
+            Err(e) => {
+                self.bridge.clear_outbound();
+                Err(self.map_callback_error(callback, e))
+            }
+        }
     }
 
     /// Dispatches an incoming serial packet to the script's `on_rx(payload, pins)` callback
@@ -79,24 +115,11 @@ impl ScriptEngine {
             let lua_payload = self.lua.create_string(payload)?;
             let lua_pins = pin_state_to_lua(&self.lua, pins)?;
 
-            on_rx
-                .call::<()>((lua_payload, lua_pins))
-                .map_err(|e| {
-                    if e.to_string().contains("FuelExceeded") {
-                        ScriptError::FuelExceeded {
-                            consumed: self.fuel.consumed_instructions(),
-                            limit: self.fuel.max_fuel(),
-                        }
-                    } else {
-                        ScriptError::CallbackError {
-                            callback: "on_rx".into(),
-                            reason: e.to_string(),
-                        }
-                    }
-                })?;
+            let result = on_rx.call::<()>((lua_payload, lua_pins));
+            self.finish_callback(result, "on_rx")
+        } else {
+            Ok(self.bridge.drain_outbound())
         }
-
-        Ok(self.bridge.drain_outbound())
     }
 
     /// Dispatches an input pin change event to the script's `on_pin_change(pins)` callback
@@ -106,15 +129,11 @@ impl ScriptEngine {
             self.fuel.reset();
             let lua_pins = pin_state_to_lua(&self.lua, new_pins)?;
 
-            on_pin_change
-                .call::<()>(lua_pins)
-                .map_err(|e| ScriptError::CallbackError {
-                    callback: "on_pin_change".into(),
-                    reason: e.to_string(),
-                })?;
+            let result = on_pin_change.call::<()>(lua_pins);
+            self.finish_callback(result, "on_pin_change")
+        } else {
+            Ok(self.bridge.drain_outbound())
         }
-
-        Ok(self.bridge.drain_outbound())
     }
 
     /// Dispatches a periodic timer event to the script's `on_timer(timer_id)` callback
@@ -122,15 +141,11 @@ impl ScriptEngine {
         let globals = self.lua.globals();
         if let Ok(on_timer) = globals.get::<Function>("on_timer") {
             self.fuel.reset();
-            on_timer
-                .call::<()>(timer_id)
-                .map_err(|e| ScriptError::CallbackError {
-                    callback: "on_timer".into(),
-                    reason: e.to_string(),
-                })?;
+            let result = on_timer.call::<()>(timer_id);
+            self.finish_callback(result, "on_timer")
+        } else {
+            Ok(self.bridge.drain_outbound())
         }
-
-        Ok(self.bridge.drain_outbound())
     }
 
     pub fn current_pins(&self) -> PinState {
@@ -201,8 +216,10 @@ mod tests {
 
     #[test]
     fn test_fuel_exhaustion_in_on_rx_aborts_cleanly() {
-        let mut config = ScriptConfig::default();
-        config.max_fuel = 5_000;
+        let config = ScriptConfig {
+            max_fuel: 5_000,
+            ..Default::default()
+        };
         let mut engine = ScriptEngine::new(config).unwrap();
 
         let runaway_script = r#"
@@ -221,5 +238,75 @@ mod tests {
             }
             other => panic!("Expected FuelExceeded, got: {:?}", other),
         }
+    }
+
+    #[test]
+    fn test_fuel_exhaustion_in_on_timer_reports_fuel_exceeded() {
+        let config = ScriptConfig {
+            max_fuel: 5_000,
+            ..Default::default()
+        };
+        let mut engine = ScriptEngine::new(config).unwrap();
+
+        engine
+            .load_script("function on_timer(id) while true do end end")
+            .unwrap();
+        let err = engine.dispatch_timer(1).unwrap_err();
+
+        match err {
+            ScriptError::FuelExceeded { consumed, limit } => {
+                assert!(consumed >= 5_000);
+                assert_eq!(limit, 5_000);
+            }
+            other => panic!("Expected FuelExceeded, got: {:?}", other),
+        }
+    }
+
+    #[test]
+    fn test_failed_callback_does_not_leak_partial_outbound() {
+        // A script that sends a byte and then errors must not leak that
+        // half-written frame into the next dispatch.
+        let mut engine = ScriptEngine::new(ScriptConfig::default()).unwrap();
+        engine
+            .load_script(
+                r#"
+                function on_rx(payload, pins)
+                    if payload == "boom" then
+                        serial.send("STALE")
+                        error("kaboom")
+                    end
+                    serial.send("OK")
+                end
+                "#,
+            )
+            .unwrap();
+
+        let err = engine.dispatch_rx(b"boom", PinState::empty()).unwrap_err();
+        assert!(matches!(err, ScriptError::CallbackError { .. }));
+
+        let responses = engine.dispatch_rx(b"good", PinState::empty()).unwrap();
+        assert_eq!(responses.len(), 1, "stale output leaked: {responses:?}");
+        assert_eq!(&responses[0][..], b"OK");
+    }
+
+    #[test]
+    fn test_bad_pin_state_type_is_rejected_without_crashing() {
+        // A Lua script calling serial.set_pins with a non-boolean value must
+        // yield a clean runtime error rather than aborting the host process.
+        let mut engine = ScriptEngine::new(ScriptConfig::default()).unwrap();
+        engine
+            .load_script(
+                r#"
+                function on_rx(payload, pins)
+                    serial.set_pins({ rts = "not-a-bool" })
+                end
+                "#,
+            )
+            .unwrap();
+        let err = engine.dispatch_rx(b"x", PinState::empty()).unwrap_err();
+        assert!(
+            matches!(err, ScriptError::CallbackError { ref callback, .. } if callback == "on_rx"),
+            "unexpected error: {err:?}"
+        );
     }
 }

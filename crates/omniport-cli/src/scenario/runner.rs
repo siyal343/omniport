@@ -1,7 +1,5 @@
 use super::error::ScenarioError;
-use super::schema::{
-    EndpointType, FaultConfigDto, ScenarioConfig, StepConfig,
-};
+use super::schema::{EndpointType, FaultConfigDto, ScenarioConfig, StepConfig};
 use crate::hex_utils::{decode_hex, hex_matches};
 use bytes::Bytes;
 use omniport_capture::pcapng::PcapngWriter;
@@ -9,7 +7,7 @@ use omniport_core::fault::FaultConfig;
 use omniport_core::routing::{BackpressurePolicy, RoutingGraph};
 use omniport_core::{AsyncEndpoint, EndpointId, FrameFlags, PinState, SerialConfig, SerialEvent};
 use omniport_script::engine::ScriptConfig;
-use omniport_script::{ScriptEngine, ScriptEndpoint};
+use omniport_script::{ScriptEndpoint, ScriptEngine};
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use std::fs::File;
@@ -59,15 +57,16 @@ pub struct ScenarioRunner {
 impl ScenarioRunner {
     /// Loads scenario configuration from a YAML file
     pub fn from_file(path: impl AsRef<Path>) -> Result<Self, ScenarioError> {
-        let content = std::fs::read_to_string(path.as_ref())
-            .map_err(|e| ScenarioError::ConfigError(format!("Failed to read scenario file: {e}")))?;
+        let content = std::fs::read_to_string(path.as_ref()).map_err(|e| {
+            ScenarioError::ConfigError(format!("Failed to read scenario file: {e}"))
+        })?;
         Self::from_yaml(&content)
     }
 
     /// Parses scenario configuration from a YAML string
     pub fn from_yaml(yaml_str: &str) -> Result<Self, ScenarioError> {
-        let config: ScenarioConfig = serde_yaml::from_str(yaml_str)
-            .map_err(|e| ScenarioError::ParseError(e.to_string()))?;
+        let config: ScenarioConfig =
+            serde_yaml::from_str(yaml_str).map_err(|e| ScenarioError::ParseError(e.to_string()))?;
         Self::new(config)
     }
 
@@ -143,7 +142,7 @@ impl ScenarioRunner {
 
         // 2. Configure routing graph and fault profiles
         for route in &config.routes {
-            let fault = route.fault.as_ref().map(convert_fault_config);
+            let fault = route.fault.as_ref().map(convert_fault_config).transpose()?;
 
             for &target in &route.targets {
                 router
@@ -264,7 +263,10 @@ impl ScenarioRunner {
     }
 
     #[allow(clippy::collapsible_if)]
-    async fn execute_step(&mut self, step: &StepConfig) -> (String, String, Result<(), ScenarioError>) {
+    async fn execute_step(
+        &mut self,
+        step: &StepConfig,
+    ) -> (String, String, Result<(), ScenarioError>) {
         match step {
             StepConfig::Sleep { duration_ms } => {
                 let desc = format!("Sleep {duration_ms}ms");
@@ -277,15 +279,30 @@ impl ScenarioRunner {
                 payload_hex,
                 payload_text,
             } => {
+                if let Err(e) = self.ensure_endpoint(*endpoint) {
+                    return ("send".into(), format!("Send on ep {endpoint}"), Err(e));
+                }
                 let payload = if let Some(hex_str) = payload_hex {
                     match decode_hex(hex_str) {
                         Ok(b) => Bytes::from(b),
-                        Err(e) => return ("send".into(), format!("Send hex on ep {endpoint}"), Err(ScenarioError::ConfigError(e))),
+                        Err(e) => {
+                            return (
+                                "send".into(),
+                                format!("Send hex on ep {endpoint}"),
+                                Err(ScenarioError::ConfigError(e)),
+                            );
+                        }
                     }
                 } else if let Some(text) = payload_text {
                     Bytes::copy_from_slice(text.as_bytes())
                 } else {
-                    return ("send".into(), format!("Send on ep {endpoint}"), Err(ScenarioError::ConfigError("No payload provided in send step".into())));
+                    return (
+                        "send".into(),
+                        format!("Send on ep {endpoint}"),
+                        Err(ScenarioError::ConfigError(
+                            "No payload provided in send step".into(),
+                        )),
+                    );
                 };
 
                 let pins = self.get_pins(*endpoint);
@@ -326,6 +343,9 @@ impl ScenarioRunner {
                 min_bytes,
             } => {
                 let desc = format!("Expect on ep {endpoint} (timeout: {timeout_ms}ms)");
+                if let Err(e) = self.ensure_endpoint(*endpoint) {
+                    return ("expect".into(), desc, Err(e));
+                }
                 let timeout = Duration::from_millis(*timeout_ms);
                 let ep_id = *endpoint;
 
@@ -388,6 +408,10 @@ impl ScenarioRunner {
                 dtr,
                 brk,
             } => {
+                let desc = format!("Set pins on ep {endpoint} (RTS={:?}, DTR={:?})", rts, dtr);
+                if let Err(e) = self.ensure_endpoint(*endpoint) {
+                    return ("set_pins".into(), desc, Err(e));
+                }
                 let mut current = self.get_pins(*endpoint);
                 if let Some(v) = rts {
                     current.set(PinState::RTS, *v);
@@ -413,7 +437,6 @@ impl ScenarioRunner {
                     payload: Bytes::new(),
                 };
 
-                let desc = format!("Set pins on ep {endpoint} (RTS={:?}, DTR={:?})", rts, dtr);
                 let _ = self.router.route(event);
                 ("set_pins".into(), desc, Ok(()))
             }
@@ -428,37 +451,59 @@ impl ScenarioRunner {
                 dcd,
                 ri,
             } => {
+                let desc = format!("Assert pins on ep {endpoint}");
+                if let Err(e) = self.ensure_endpoint(*endpoint) {
+                    return ("assert_pins".into(), desc, Err(e));
+                }
                 let current = self.get_pins(*endpoint);
                 let mut mismatches = Vec::new();
 
                 if let Some(expected) = rts {
                     if current.contains(PinState::RTS) != *expected {
-                        mismatches.push(format!("RTS (expected {expected}, got {})", current.contains(PinState::RTS)));
+                        mismatches.push(format!(
+                            "RTS (expected {expected}, got {})",
+                            current.contains(PinState::RTS)
+                        ));
                     }
                 }
                 if let Some(expected) = cts {
                     if current.contains(PinState::CTS) != *expected {
-                        mismatches.push(format!("CTS (expected {expected}, got {})", current.contains(PinState::CTS)));
+                        mismatches.push(format!(
+                            "CTS (expected {expected}, got {})",
+                            current.contains(PinState::CTS)
+                        ));
                     }
                 }
                 if let Some(expected) = dtr {
                     if current.contains(PinState::DTR) != *expected {
-                        mismatches.push(format!("DTR (expected {expected}, got {})", current.contains(PinState::DTR)));
+                        mismatches.push(format!(
+                            "DTR (expected {expected}, got {})",
+                            current.contains(PinState::DTR)
+                        ));
                     }
                 }
                 if let Some(expected) = dsr {
                     if current.contains(PinState::DSR) != *expected {
-                        mismatches.push(format!("DSR (expected {expected}, got {})", current.contains(PinState::DSR)));
+                        mismatches.push(format!(
+                            "DSR (expected {expected}, got {})",
+                            current.contains(PinState::DSR)
+                        ));
                     }
                 }
                 if let Some(expected) = dcd {
                     if current.contains(PinState::DCD) != *expected {
-                        mismatches.push(format!("DCD (expected {expected}, got {})", current.contains(PinState::DCD)));
+                        mismatches.push(format!(
+                            "DCD (expected {expected}, got {})",
+                            current.contains(PinState::DCD)
+                        ));
                     }
                 }
                 if let Some(expected) = ri {
                     if current.contains(PinState::RI) != *expected {
-                        mismatches.push(format!("RI (expected {expected}, got {})", current.contains(PinState::RI)));
+                        mismatches.push(format!(
+                            "RI (expected {expected}, got {})",
+                            current.contains(PinState::RI)
+                        ));
                     }
                 }
 
@@ -515,6 +560,20 @@ impl ScenarioRunner {
         }
     }
 
+    /// Rejects steps that reference an endpoint which was never declared.
+    /// Previously `send` on a typo'd/undeclared endpoint silently succeeded
+    /// (the routing graph returned zero destinations), making a broken
+    /// scenario report PASS.
+    fn ensure_endpoint(&self, ep_id: EndpointId) -> Result<(), ScenarioError> {
+        if self.router.has_endpoint(ep_id) {
+            Ok(())
+        } else {
+            Err(ScenarioError::ConfigError(format!(
+                "step references undeclared endpoint {ep_id}"
+            )))
+        }
+    }
+
     fn get_pins(&self, ep_id: EndpointId) -> PinState {
         let guard = self.pin_states.lock().unwrap_or_else(|e| e.into_inner());
         guard.get(&ep_id).copied().unwrap_or_default()
@@ -526,11 +585,51 @@ impl ScenarioRunner {
     }
 }
 
-fn convert_fault_config(dto: &FaultConfigDto) -> FaultConfig {
-    let mut cfg = FaultConfig::default();
-    if dto.drop_rate > 0.0 {
-        // Disconnect can simulate 100% drop or drop_rate in routing
+/// Maps the declarative fault profile onto the core `FaultConfig`.
+///
+/// Every documented YAML field must either take effect or be rejected with a
+/// clear error — silently ignoring a fault (as `drop_rate` used to be) makes a
+/// failing CI scenario look green.
+fn convert_fault_config(dto: &FaultConfigDto) -> Result<FaultConfig, ScenarioError> {
+    fn check_unit_interval(field: &str, value: f64) -> Result<(), ScenarioError> {
+        if !value.is_finite() || !(0.0..=1.0).contains(&value) {
+            return Err(ScenarioError::ConfigError(format!(
+                "fault.{field} must be a probability in 0.0..=1.0, got {value}"
+            )));
+        }
+        Ok(())
     }
+    fn check_non_negative(field: &str, value: f64) -> Result<(), ScenarioError> {
+        if !value.is_finite() || value < 0.0 {
+            return Err(ScenarioError::ConfigError(format!(
+                "fault.{field} must be a finite non-negative number, got {value}"
+            )));
+        }
+        Ok(())
+    }
+
+    check_unit_interval("drop_rate", dto.drop_rate)?;
+    check_unit_interval("bit_error_rate", dto.bit_error_rate)?;
+    check_non_negative("mean_latency_ms", dto.mean_latency_ms)?;
+    check_non_negative("jitter_stddev_ms", dto.jitter_stddev_ms)?;
+
+    let mut cfg = FaultConfig::default();
+
+    // `FaultConfig` models an edge either as connected or fully disconnected;
+    // there is no per-frame Bernoulli drop. A fractional drop_rate would be
+    // silently ignored, so fail loudly instead of pretending it was applied.
+    if dto.drop_rate >= 1.0 {
+        cfg.disconnected = true;
+    } else if dto.drop_rate > 0.0 {
+        return Err(ScenarioError::ConfigError(format!(
+            "fault.drop_rate {} is not supported: only 0.0 (no drops) and 1.0 \
+             (full disconnect) are currently modelled by the fault injector",
+            dto.drop_rate
+        )));
+    }
+
+    // `mean_latency_ms` is the mean added propagation delay and maps onto the
+    // Gaussian jitter mean; `jitter_stddev_ms` is its standard deviation.
     cfg.bit_error_rate = dto.bit_error_rate;
     if dto.mean_latency_ms > 0.0 {
         cfg.jitter_mean = Duration::from_secs_f64(dto.mean_latency_ms / 1000.0);
@@ -541,7 +640,7 @@ fn convert_fault_config(dto: &FaultConfigDto) -> FaultConfig {
     if dto.corrupt_nth_crc > 0 {
         cfg.corrupt_nth_crc = Some(dto.corrupt_nth_crc as u64);
     }
-    cfg
+    Ok(cfg)
 }
 
 fn spawn_endpoint_bridge<E: AsyncEndpoint>(

@@ -29,6 +29,37 @@ pub fn to_wide_null(s: &str) -> Vec<u16> {
     s.encode_utf16().chain(std::iter::once(0)).collect()
 }
 
+/// Rejects serial configurations that cannot be programmed into a UART.
+/// Invalid values previously reached the DCB layer (or the token bucket,
+/// where baud_rate == 0 causes a division by zero and an effectively infinite
+/// throttle delay) instead of failing at the API boundary.
+pub fn validate_config(cfg: &SerialConfig) -> Result<()> {
+    if cfg.baud_rate == 0 {
+        return Err(HalError::InvalidParameter(
+            "baud_rate must be greater than 0".to_string(),
+        ));
+    }
+    if !(5..=8).contains(&cfg.data_bits) {
+        return Err(HalError::InvalidParameter(format!(
+            "data_bits must be 5..=8, got {}",
+            cfg.data_bits
+        )));
+    }
+    if !(1..=3).contains(&cfg.stop_bits) {
+        return Err(HalError::InvalidParameter(format!(
+            "stop_bits must be 1, 2 or 3 (1.5), got {}",
+            cfg.stop_bits
+        )));
+    }
+    if cfg.parity > 2 {
+        return Err(HalError::InvalidParameter(format!(
+            "parity must be 0 (none), 1 (odd) or 2 (even), got {}",
+            cfg.parity
+        )));
+    }
+    Ok(())
+}
+
 #[cfg(windows)]
 struct SafeHandle(HANDLE);
 
@@ -76,6 +107,7 @@ impl Win32SerialEndpoint {
         config: SerialConfig,
     ) -> Result<Self> {
         let port_str = port_name.into();
+        validate_config(&config)?;
         let full_path = format_com_path(&port_str);
         let wide_path = to_wide_null(&full_path);
 
@@ -128,6 +160,7 @@ impl Win32SerialEndpoint {
         port_name: impl Into<String>,
         config: SerialConfig,
     ) -> Result<Self> {
+        validate_config(&config)?;
         let (master, peer) = tokio::io::duplex(65536);
         let throttler = TokenBucketThrottler::new(config);
 
@@ -220,13 +253,16 @@ impl AsyncEndpoint for Win32SerialEndpoint {
                 #[cfg(windows)]
                 SerialIo::Hardware { handle } => {
                     let h = std::sync::Arc::clone(handle);
-                    tokio::task::spawn_blocking(move || {
+                    let (lbuf, cnt) = tokio::task::spawn_blocking(move || {
                         let mut bytes_read = 0u32;
                         let mut overlapped: windows_sys::Win32::System::IO::OVERLAPPED =
                             unsafe { std::mem::zeroed() };
                         let event = unsafe {
                             CreateEventW(std::ptr::null(), TRUE, FALSE, std::ptr::null())
                         };
+                        if event.is_null() {
+                            return Err(std::io::Error::last_os_error());
+                        }
                         overlapped.hEvent = event;
 
                         let mut lbuf = [0u8; 4096];
@@ -242,27 +278,34 @@ impl AsyncEndpoint for Win32SerialEndpoint {
 
                         if res == 0 {
                             let err = unsafe { GetLastError() };
-                            if err == ERROR_IO_PENDING {
-                                unsafe {
-                                    WaitForSingleObject(event, INFINITE);
-                                    windows_sys::Win32::System::IO::GetOverlappedResult(
-                                        h.0,
-                                        &overlapped,
-                                        &mut bytes_read,
-                                        TRUE,
-                                    );
-                                }
+                            if err != ERROR_IO_PENDING {
+                                // The read failed outright; report it instead of
+                                // emitting a silent zero-length event.
+                                unsafe { CloseHandle(event) };
+                                return Err(std::io::Error::from_raw_os_error(err as i32));
+                            }
+                            unsafe { WaitForSingleObject(event, INFINITE) };
+                            if unsafe {
+                                windows_sys::Win32::System::IO::GetOverlappedResult(
+                                    h.0,
+                                    &overlapped,
+                                    &mut bytes_read,
+                                    TRUE,
+                                )
+                            } == 0
+                            {
+                                let io_err = std::io::Error::last_os_error();
+                                unsafe { CloseHandle(event) };
+                                return Err(io_err);
                             }
                         }
                         unsafe { CloseHandle(event) };
-                        (lbuf, bytes_read as usize)
+                        Ok((lbuf, bytes_read as usize))
                     })
                     .await
-                    .map(|(lbuf, cnt)| {
-                        buf[..cnt].copy_from_slice(&lbuf[..cnt]);
-                        cnt
-                    })
-                    .map_err(std::io::Error::other)?
+                    .map_err(std::io::Error::other)??;
+                    buf[..cnt].copy_from_slice(&lbuf[..cnt]);
+                    cnt
                 }
                 SerialIo::Mock { master, .. } => {
                     use tokio::io::AsyncReadExt;
@@ -313,6 +356,9 @@ impl AsyncEndpoint for Win32SerialEndpoint {
                             let event = unsafe {
                                 CreateEventW(std::ptr::null(), TRUE, FALSE, std::ptr::null())
                             };
+                            if event.is_null() {
+                                return Err(std::io::Error::last_os_error());
+                            }
                             overlapped.hEvent = event;
 
                             let res = unsafe {
@@ -327,22 +373,30 @@ impl AsyncEndpoint for Win32SerialEndpoint {
 
                             if res == 0 {
                                 let err = unsafe { GetLastError() };
-                                if err == ERROR_IO_PENDING {
-                                    unsafe {
-                                        WaitForSingleObject(event, INFINITE);
-                                        windows_sys::Win32::System::IO::GetOverlappedResult(
-                                            h.0,
-                                            &overlapped,
-                                            &mut bytes_written,
-                                            TRUE,
-                                        );
-                                    }
+                                if err != ERROR_IO_PENDING {
+                                    unsafe { CloseHandle(event) };
+                                    return Err(std::io::Error::from_raw_os_error(err as i32));
+                                }
+                                unsafe { WaitForSingleObject(event, INFINITE) };
+                                if unsafe {
+                                    windows_sys::Win32::System::IO::GetOverlappedResult(
+                                        h.0,
+                                        &overlapped,
+                                        &mut bytes_written,
+                                        TRUE,
+                                    )
+                                } == 0
+                                {
+                                    let io_err = std::io::Error::last_os_error();
+                                    unsafe { CloseHandle(event) };
+                                    return Err(io_err);
                                 }
                             }
                             unsafe { CloseHandle(event) };
+                            Ok::<(), std::io::Error>(())
                         })
                         .await
-                        .map_err(std::io::Error::other)?;
+                        .map_err(std::io::Error::other)??;
                     }
                     SerialIo::Mock { master, .. } => {
                         use tokio::io::AsyncWriteExt;
@@ -386,6 +440,7 @@ impl AsyncEndpoint for Win32SerialEndpoint {
     }
 
     fn configure(&mut self, cfg: SerialConfig) -> std::io::Result<()> {
+        validate_config(&cfg).map_err(std::io::Error::other)?;
         self.config = cfg;
         self.throttler.update_config(cfg);
 
@@ -402,6 +457,8 @@ impl AsyncEndpoint for Win32SerialEndpoint {
 
 #[cfg(windows)]
 fn apply_dcb_config(handle: HANDLE, cfg: &SerialConfig) -> Result<()> {
+    validate_config(cfg)?;
+
     let mut dcb: DCB = unsafe { std::mem::zeroed() };
     dcb.DCBlength = std::mem::size_of::<DCB>() as u32;
 
@@ -409,11 +466,30 @@ fn apply_dcb_config(handle: HANDLE, cfg: &SerialConfig) -> Result<()> {
         return Err(HalError::CommState(std::io::Error::last_os_error()));
     }
 
+    configure_dcb(&mut dcb, cfg)?;
+
+    if unsafe { SetCommState(handle, &dcb) } == 0 {
+        return Err(HalError::CommState(std::io::Error::last_os_error()));
+    }
+    Ok(())
+}
+
+/// Applies the requested line settings to a DCB obtained from `GetCommState`
+/// without clobbering the control flags Windows filled in.
+///
+/// The `fBinary` flag lives in the same `_bitfield` word as `fDtrControl`
+/// (bits 4-5) and `fRtsControl` (bits 12-13); assigning the whole bitfield used
+/// to disable software DTR/RTS control, so `EscapeCommFunction` became a no-op.
+#[cfg(windows)]
+fn configure_dcb(dcb: &mut DCB, cfg: &SerialConfig) -> Result<()> {
+    validate_config(cfg)?;
+
     dcb.BaudRate = cfg.baud_rate;
     dcb.ByteSize = cfg.data_bits;
 
     dcb.StopBits = match cfg.stop_bits {
         2 => TWOSTOPBITS,
+        3 => ONE5STOPBITS,
         _ => ONESTOPBIT,
     };
 
@@ -422,13 +498,15 @@ fn apply_dcb_config(handle: HANDLE, cfg: &SerialConfig) -> Result<()> {
         2 => EVENPARITY,
         _ => NOPARITY,
     };
-
-    // Set binary mode
-    dcb._bitfield = 1; // fBinary = 1
-
-    if unsafe { SetCommState(handle, &dcb) } == 0 {
-        return Err(HalError::CommState(std::io::Error::last_os_error()));
+    // fParity enables parity-error checking and must follow the parity mode.
+    if cfg.parity != 0 {
+        dcb._bitfield |= 0x0000_0002; // fParity
+    } else {
+        dcb._bitfield &= !0x0000_0002;
     }
+
+    // Set binary mode while preserving every other control bit.
+    dcb._bitfield |= 0x0000_0001; // fBinary = 1
     Ok(())
 }
 
@@ -491,6 +569,126 @@ mod tests {
         let recv_evt = uart.recv().await.expect("uart recv");
         assert_eq!(recv_evt.source_id, 1);
         assert_eq!(&recv_evt.payload[..], b"PONG\r\n");
+    }
+
+    #[tokio::test]
+    async fn test_mock_uart_rejects_invalid_serial_configuration() {
+        // baud_rate == 0 used to divide by zero in the token bucket and make a
+        // send() wait for ~584 years instead of failing fast.
+        let invalid = [
+            SerialConfig {
+                baud_rate: 0,
+                ..SerialConfig::default()
+            },
+            SerialConfig {
+                data_bits: 9,
+                ..SerialConfig::default()
+            },
+            SerialConfig {
+                data_bits: 4,
+                ..SerialConfig::default()
+            },
+            SerialConfig {
+                stop_bits: 0,
+                ..SerialConfig::default()
+            },
+            SerialConfig {
+                stop_bits: 4,
+                ..SerialConfig::default()
+            },
+            SerialConfig {
+                parity: 3,
+                ..SerialConfig::default()
+            },
+        ];
+        for (i, cfg) in invalid.iter().enumerate() {
+            match Win32SerialEndpoint::open_mock(10 + i as u16, "bad", "COM99", *cfg) {
+                Err(HalError::InvalidParameter(_)) => {}
+                Err(other) => {
+                    panic!("config {cfg:?} must be rejected with InvalidParameter, got {other:?}")
+                }
+                Ok(_) => panic!("config {cfg:?} must be rejected, but was accepted"),
+            }
+        }
+
+        // configure() must enforce the same validation.
+        let mut uart = Win32SerialEndpoint::open_mock(30, "ok", "COM30", SerialConfig::default())
+            .expect("open mock uart");
+        let err = uart
+            .configure(SerialConfig {
+                baud_rate: 0,
+                ..SerialConfig::default()
+            })
+            .expect_err("zero baud rate must be rejected");
+        assert_eq!(err.kind(), std::io::ErrorKind::Other);
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn test_configure_dcb_preserves_control_flags() {
+        // Bits as Windows returns them from GetCommState.
+        const F_BINARY: u32 = 0x0000_0001;
+        const F_PARITY: u32 = 0x0000_0002;
+        const F_OUTX_CTS_FLOW: u32 = 0x0000_0004;
+        const DTR_CONTROL_ENABLE: u32 = 0x0000_0010; // fDtrControl bits 4-5 = 01
+        const RTS_CONTROL_ENABLE: u32 = 0x0000_1000; // fRtsControl bits 12-13 = 01
+
+        let mut dcb: DCB = unsafe { std::mem::zeroed() };
+        dcb.DCBlength = std::mem::size_of::<DCB>() as u32;
+        dcb._bitfield = F_BINARY | F_OUTX_CTS_FLOW | DTR_CONTROL_ENABLE | RTS_CONTROL_ENABLE;
+
+        let cfg = SerialConfig {
+            baud_rate: 57_600,
+            data_bits: 7,
+            stop_bits: 2,
+            parity: 2,
+        };
+        configure_dcb(&mut dcb, &cfg).expect("configure dcb");
+
+        assert_eq!(dcb.BaudRate, 57_600);
+        assert_eq!(dcb.ByteSize, 7);
+        assert_eq!(dcb.StopBits, TWOSTOPBITS);
+        assert_eq!(dcb.Parity, EVENPARITY);
+        assert_eq!(dcb._bitfield & F_BINARY, F_BINARY, "fBinary must be set");
+        assert_eq!(
+            dcb._bitfield & DTR_CONTROL_ENABLE,
+            DTR_CONTROL_ENABLE,
+            "fDtrControl must stay enabled for EscapeCommFunction(DTR)"
+        );
+        assert_eq!(
+            dcb._bitfield & RTS_CONTROL_ENABLE,
+            RTS_CONTROL_ENABLE,
+            "fRtsControl must stay enabled for EscapeCommFunction(RTS)"
+        );
+        assert_eq!(dcb._bitfield & F_OUTX_CTS_FLOW, F_OUTX_CTS_FLOW);
+        assert_eq!(
+            dcb._bitfield & F_PARITY,
+            F_PARITY,
+            "fParity follows parity mode"
+        );
+
+        // Switching to no parity clears fParity only.
+        let nopar = SerialConfig { parity: 0, ..cfg };
+        configure_dcb(&mut dcb, &nopar).expect("configure dcb without parity");
+        assert_eq!(dcb._bitfield & F_PARITY, 0);
+        assert_eq!(dcb._bitfield & DTR_CONTROL_ENABLE, DTR_CONTROL_ENABLE);
+        assert_eq!(dcb.Parity, NOPARITY);
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn test_configure_dcb_maps_one_and_half_stop_bits() {
+        let mut dcb: DCB = unsafe { std::mem::zeroed() };
+        dcb.DCBlength = std::mem::size_of::<DCB>() as u32;
+        let cfg = SerialConfig {
+            baud_rate: 9_600,
+            data_bits: 5,
+            stop_bits: 3,
+            parity: 1,
+        };
+        configure_dcb(&mut dcb, &cfg).expect("configure dcb");
+        assert_eq!(dcb.StopBits, ONE5STOPBITS);
+        assert_eq!(dcb.Parity, ODDPARITY);
     }
 
     #[tokio::test]

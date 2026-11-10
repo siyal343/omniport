@@ -1,11 +1,9 @@
-use omniport_core::{
-    AsyncEndpoint, EndpointId, FrameFlags, PinState, SerialConfig, SerialEvent,
-};
+use omniport_core::{AsyncEndpoint, EndpointId, FrameFlags, PinState, SerialConfig, SerialEvent};
 use std::future::Future;
 use std::pin::Pin;
 use std::sync::Arc;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
-use tokio::sync::{mpsc, Mutex};
+use tokio::sync::{Mutex, mpsc};
 
 use crate::engine::ScriptEngine;
 
@@ -129,9 +127,9 @@ impl AsyncEndpoint for ScriptEndpoint {
         Box::pin(async move {
             let (responses, current_pins) = {
                 let mut eng = self.engine.lock().await;
-                let responses = eng.dispatch_rx(&event.payload, event.pins).map_err(|e| {
-                    std::io::Error::other(format!("Lua script error: {e}"))
-                })?;
+                let responses = eng
+                    .dispatch_rx(&event.payload, event.pins)
+                    .map_err(|e| std::io::Error::other(format!("Lua script error: {e}")))?;
                 let pins = eng.current_pins();
                 (responses, pins)
             };

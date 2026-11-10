@@ -2,14 +2,7 @@ use mlua::{Lua, Result, Table};
 
 /// List of dangerous global identifiers stripped from the sandboxed environment
 pub const FORBIDDEN_GLOBALS: &[&str] = &[
-    "dofile",
-    "loadfile",
-    "load",
-    "require",
-    "package",
-    "io",
-    "os",
-    "debug",
+    "dofile", "loadfile", "load", "require", "package", "io", "os", "debug",
 ];
 
 /// Applies strict sandboxing to the Lua runtime

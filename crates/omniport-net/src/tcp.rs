@@ -1,20 +1,18 @@
 use bytes::Bytes;
-use omniport_core::{
-    AsyncEndpoint, EndpointId, FrameFlags, PinState, SerialConfig, SerialEvent,
-};
+use omniport_core::{AsyncEndpoint, EndpointId, FrameFlags, PinState, SerialConfig, SerialEvent};
 use std::future::Future;
 use std::net::SocketAddr;
 use std::pin::Pin;
-use std::sync::atomic::{AtomicU8, Ordering};
 use std::sync::Arc;
+use std::sync::atomic::{AtomicU8, Ordering};
 use std::time::{SystemTime, UNIX_EPOCH};
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::{TcpListener, TcpStream};
 use tokio::sync::mpsc;
 
 use crate::rfc2217::{
-    config_to_rfc2217_commands, modem_state_to_pin_state, pin_state_to_control, Rfc2217Codec,
-    Rfc2217Command, COM_PORT_OPTION, DO, WILL,
+    COM_PORT_OPTION, DO, Rfc2217Codec, Rfc2217Command, WILL, config_to_rfc2217_commands,
+    modem_state_to_pin_state, pin_state_to_control,
 };
 
 pub struct TcpEndpoint {
@@ -22,7 +20,6 @@ pub struct TcpEndpoint {
     name: String,
     config: SerialConfig,
     pins: Arc<AtomicU8>,
-    _outbound_tx: mpsc::Sender<SerialEvent>,
     outbound_rx: mpsc::Receiver<SerialEvent>,
     tcp_tx: mpsc::Sender<Bytes>,
     rfc2217_enabled: bool,
@@ -97,7 +94,6 @@ impl TcpEndpoint {
 
         // Background read loop
         let pins_clone = pins.clone();
-        let out_tx = outbound_tx.clone();
         let source_id = id;
 
         tokio::spawn(async move {
@@ -136,7 +132,7 @@ impl TcpEndpoint {
                                         pins: updated,
                                         payload: Bytes::new(),
                                     };
-                                    let _ = out_tx.send(pin_evt).await;
+                                    let _ = outbound_tx.send(pin_evt).await;
                                 }
                             }
 
@@ -149,7 +145,7 @@ impl TcpEndpoint {
                                     pins: cur_pins,
                                     payload: Bytes::copy_from_slice(&clean_data),
                                 };
-                                if out_tx.send(evt).await.is_err() {
+                                if outbound_tx.send(evt).await.is_err() {
                                     break;
                                 }
                             }
@@ -163,7 +159,7 @@ impl TcpEndpoint {
                                 pins: cur_pins,
                                 payload: Bytes::copy_from_slice(&buf[..n]),
                             };
-                            if out_tx.send(evt).await.is_err() {
+                            if outbound_tx.send(evt).await.is_err() {
                                 break;
                             }
                         }
@@ -177,7 +173,6 @@ impl TcpEndpoint {
             name: name.into(),
             config,
             pins,
-            _outbound_tx: outbound_tx,
             outbound_rx,
             tcp_tx,
             rfc2217_enabled,
@@ -228,7 +223,8 @@ impl AsyncEndpoint for TcpEndpoint {
     }
 
     fn set_pins(&mut self, new_pins: PinState) -> std::io::Result<()> {
-        let old_pins = PinState::from_bits_truncate(self.pins.swap(new_pins.bits(), Ordering::AcqRel));
+        let old_pins =
+            PinState::from_bits_truncate(self.pins.swap(new_pins.bits(), Ordering::AcqRel));
 
         if self.rfc2217_enabled {
             let commands = pin_state_to_control(new_pins, old_pins);
@@ -269,15 +265,10 @@ mod tests {
             TcpEndpoint::from_stream(10, "Server", stream, SerialConfig::default(), false).unwrap()
         });
 
-        let mut client = TcpEndpoint::connect_client(
-            11,
-            "Client",
-            addr,
-            SerialConfig::default(),
-            false,
-        )
-        .await
-        .unwrap();
+        let mut client =
+            TcpEndpoint::connect_client(11, "Client", addr, SerialConfig::default(), false)
+                .await
+                .unwrap();
 
         let mut server = server_task.await.unwrap();
 
@@ -293,6 +284,40 @@ mod tests {
 
         let recv_evt = server.recv().await.unwrap();
         assert_eq!(&recv_evt.payload[..], b"NET_PING");
+    }
+
+    #[tokio::test]
+    async fn test_tcp_recv_reports_peer_disconnect_instead_of_hanging() {
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+
+        // Server accepts the connection and immediately closes its side.
+        let server = tokio::spawn(async move {
+            let (stream, _) = listener.accept().await.unwrap();
+            drop(stream);
+        });
+
+        let mut client = TcpEndpoint::connect_client(
+            71,
+            "DisconnectClient",
+            addr,
+            SerialConfig::default(),
+            false,
+        )
+        .await
+        .unwrap();
+
+        server.await.unwrap();
+
+        // Regression: a keep-alive sender clone used to keep the channel open
+        // forever, so recv() blocked instead of surfacing the EOF.
+        let res = tokio::time::timeout(std::time::Duration::from_secs(2), client.recv())
+            .await
+            .expect("recv() must not hang after the peer closes the connection");
+        assert!(
+            res.is_err(),
+            "recv() must report EOF/UnexpectedEof after peer close"
+        );
     }
 
     #[tokio::test]
@@ -316,15 +341,10 @@ mod tests {
             tokio::time::sleep(tokio::time::Duration::from_millis(50)).await;
         });
 
-        let mut client = TcpEndpoint::connect_client(
-            20,
-            "RfcClient",
-            addr,
-            SerialConfig::default(),
-            true,
-        )
-        .await
-        .unwrap();
+        let mut client =
+            TcpEndpoint::connect_client(20, "RfcClient", addr, SerialConfig::default(), true)
+                .await
+                .unwrap();
 
         // Await PIN_CHANGE event from server
         let pin_evt = client.recv().await.unwrap();

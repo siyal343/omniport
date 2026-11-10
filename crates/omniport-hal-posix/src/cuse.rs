@@ -1,6 +1,6 @@
 use crate::error::{HalError, Result};
-use crate::throttler::TokenBucketThrottler;
 use bytes::Bytes;
+use omniport_core::TokenBucketThrottler;
 use omniport_core::{AsyncEndpoint, EndpointId, FrameFlags, PinState, SerialConfig, SerialEvent};
 use std::future::Future;
 use std::pin::Pin;
@@ -247,9 +247,19 @@ impl SerialIoctlHandler {
                 Ok(Vec::new())
             }
             TCSBRK => {
-                // Generate a break event
-                self.set_break(true);
-                self.set_break(false);
+                // Linux tty semantics: a non-zero argument means "wait until the
+                // output has drained" and must NOT emit a break; only argument
+                // 0 sends a break.
+                let arg = if arg_in.len() >= 4 {
+                    u32::from_ne_bytes([arg_in[0], arg_in[1], arg_in[2], arg_in[3]])
+                } else {
+                    0
+                };
+                if arg == 0 {
+                    // Mock approximation of tcsendbreak(): pulse BREAK.
+                    self.set_break(true);
+                    self.set_break(false);
+                }
                 Ok(Vec::new())
             }
             TIOCGICOUNT => Ok(self.counters.to_bytes().to_vec()),
@@ -394,10 +404,21 @@ impl CuseEndpoint {
         &mut self.throttler
     }
 
-    /// Dispatches an ioctl command to the endpoint's handler
-    pub async fn dispatch_ioctl(&self, cmd: u32, arg_in: &[u8]) -> Result<Vec<u8>> {
-        let mut guard = self.handler.lock().await;
-        guard.handle_ioctl(cmd, arg_in)
+    /// Dispatches an ioctl command to the endpoint's handler.
+    ///
+    /// Line-rate changes made through the device node (`TCSETS`) are mirrored
+    /// onto the software baud throttler; previously only the handler's config
+    /// changed and writes kept using the old rate.
+    pub async fn dispatch_ioctl(&mut self, cmd: u32, arg_in: &[u8]) -> Result<Vec<u8>> {
+        let result = {
+            let mut guard = self.handler.lock().await;
+            guard.handle_ioctl(cmd, arg_in)
+        };
+        if result.is_ok() && cmd == TCSETS {
+            let cfg = self.handler.lock().await.config();
+            self.throttler.update_config(cfg);
+        }
+        result
     }
 
     /// Asynchronously awaits modem pin transition (implements `TIOCMIWAIT`)
@@ -550,6 +571,49 @@ mod tests {
         // TCSBRK triggers break toggle
         handler.handle_ioctl(TCSBRK, &[]).unwrap();
         assert_eq!(handler.counters().brk, 2);
+    }
+
+    #[tokio::test]
+    async fn test_cuse_tcsbrk_nonzero_arg_does_not_emit_break() {
+        let mut handler = SerialIoctlHandler::new(PinState::empty(), SerialConfig::default());
+
+        // TCSBRK with a non-zero argument means "drain output", not "send break".
+        handler
+            .handle_ioctl(TCSBRK, &1u32.to_ne_bytes())
+            .expect("TCSBRK drain");
+        assert_eq!(handler.counters().brk, 0);
+        assert!(!handler.pins().contains(PinState::BREAK));
+
+        // TCSBRK with argument 0 sends a break (approximated as a pulse).
+        handler
+            .handle_ioctl(TCSBRK, &0u32.to_ne_bytes())
+            .expect("TCSBRK break");
+        assert_eq!(handler.counters().brk, 1);
+        assert!(!handler.pins().contains(PinState::BREAK));
+    }
+
+    #[tokio::test]
+    async fn test_cuse_tcsets_reconfigures_throttler() {
+        let config = SerialConfig {
+            baud_rate: 115_200,
+            data_bits: 8,
+            stop_bits: 1,
+            parity: 0,
+        };
+        let mut ep = CuseEndpoint::open(9, "cuse_baud", "ttyOmniBaud", config, PinState::empty())
+            .expect("open cuse endpoint");
+        assert_eq!(ep.throttler().byte_rate(), 11_520.0);
+
+        let mut arg = [0u8; 8];
+        arg[0..4].copy_from_slice(&9_600u32.to_ne_bytes());
+        arg[4] = 8;
+        arg[5] = 1;
+        arg[6] = 0;
+        ep.dispatch_ioctl(TCSETS, &arg).await.expect("TCSETS");
+
+        assert_eq!(ep.handler().lock().await.config().baud_rate, 9_600);
+        assert_eq!(ep.throttler().config().baud_rate, 9_600);
+        assert_eq!(ep.throttler().byte_rate(), 960.0);
     }
 
     #[tokio::test]

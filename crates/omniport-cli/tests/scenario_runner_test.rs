@@ -162,7 +162,11 @@ steps:
     let mut runner = ScenarioRunner::from_yaml(yaml).expect("Failed to parse scenario");
     let report = runner.run().await;
 
-    assert!(report.success, "Delayed packet should arrive and pass: {:?}", report.error);
+    assert!(
+        report.success,
+        "Delayed packet should arrive and pass: {:?}",
+        report.error
+    );
     assert_eq!(report.passed_steps, 2);
 }
 
@@ -217,7 +221,189 @@ steps:
 
     // Verify PCAPNG file exists and contains binary data
     let metadata = std::fs::metadata(temp_pcap.path()).expect("PCAPNG file should exist");
-    assert!(metadata.len() > 64, "PCAPNG file must contain headers and packets");
+    assert!(
+        metadata.len() > 64,
+        "PCAPNG file must contain headers and packets"
+    );
+}
+
+#[tokio::test]
+async fn test_drop_rate_full_disconnect_actually_drops_packets() {
+    // drop_rate: 1.0 is the documented "packet drop rate" extreme and must map
+    // onto the fault injector's full-disconnect mode. Previously the field was
+    // parsed then silently ignored, so the packet still arrived.
+    let yaml = r#"
+version: "1.0"
+name: "Full Drop Scenario"
+
+endpoints:
+  - id: 1
+    name: "sender"
+    type: "mock"
+  - id: 2
+    name: "receiver"
+    type: "mock"
+
+routes:
+  - id: 1
+    source: 1
+    targets: [2]
+    fault:
+      drop_rate: 1.0
+
+steps:
+  - action: "send"
+    endpoint: 1
+    payload_text: "MUST_BE_DROPPED"
+  - action: "expect"
+    endpoint: 2
+    timeout_ms: 100
+    match_text: "MUST_BE_DROPPED"
+"#;
+
+    let mut runner = ScenarioRunner::from_yaml(yaml).expect("scenario should parse");
+    let report = runner.run().await;
+
+    assert!(
+        !report.success,
+        "drop_rate: 1.0 must drop the frame, but the expect step matched it"
+    );
+    assert!(
+        report.error.unwrap().contains("Timed out"),
+        "expected an expectation timeout caused by the drop"
+    );
+}
+
+#[tokio::test]
+async fn test_fault_drop_rate_zero_keeps_packets_flowing() {
+    let yaml = r#"
+version: "1.0"
+name: "No Drop Scenario"
+
+endpoints:
+  - id: 1
+    name: "sender"
+    type: "mock"
+  - id: 2
+    name: "receiver"
+    type: "mock"
+
+routes:
+  - id: 1
+    source: 1
+    targets: [2]
+    fault:
+      drop_rate: 0.0
+
+steps:
+  - action: "send"
+    endpoint: 1
+    payload_text: "DELIVERED"
+  - action: "expect"
+    endpoint: 2
+    timeout_ms: 500
+    match_text: "DELIVERED"
+"#;
+
+    let mut runner = ScenarioRunner::from_yaml(yaml).expect("scenario should parse");
+    let report = runner.run().await;
+    assert!(report.success, "expected pass: {:?}", report.error);
+}
+
+#[tokio::test]
+async fn test_unsupported_fractional_drop_rate_is_rejected_loudly() {
+    // The fault injector has no per-frame Bernoulli drop; a fractional rate must
+    // be an explicit configuration error, never a silent no-op.
+    let yaml = r#"
+version: "1.0"
+name: "Fractional Drop Scenario"
+
+endpoints:
+  - id: 1
+    name: "sender"
+    type: "mock"
+  - id: 2
+    name: "receiver"
+    type: "mock"
+
+routes:
+  - id: 1
+    source: 1
+    targets: [2]
+    fault:
+      drop_rate: 0.5
+"#;
+
+    let err = match ScenarioRunner::from_yaml(yaml) {
+        Ok(_) => panic!("fractional drop_rate must be rejected"),
+        Err(e) => e,
+    };
+    let msg = err.to_string();
+    assert!(
+        msg.contains("drop_rate") && msg.contains("not supported"),
+        "unexpected error: {msg}"
+    );
+}
+
+#[tokio::test]
+async fn test_out_of_range_fault_probabilities_are_rejected() {
+    for field in ["drop_rate", "bit_error_rate"] {
+        let yaml = format!(
+            r#"
+version: "1.0"
+name: "Bad Fault Scenario"
+endpoints:
+  - id: 1
+    name: "sender"
+    type: "mock"
+  - id: 2
+    name: "receiver"
+    type: "mock"
+routes:
+  - id: 1
+    source: 1
+    targets: [2]
+    fault:
+      {field}: 1.5
+"#
+        );
+        let err = match ScenarioRunner::from_yaml(&yaml) {
+            Ok(_) => panic!("{field}: 1.5 must be rejected"),
+            Err(e) => e,
+        };
+        assert!(
+            err.to_string().contains(field),
+            "error should name the bad field {field}: {err}"
+        );
+    }
+}
+
+#[tokio::test]
+async fn test_steps_referencing_undeclared_endpoints_fail_loudly() {
+    // A typo in the step endpoint used to be a silent no-op: `send` routed to
+    // zero destinations and the scenario reported PASS.
+    let yaml = r#"
+version: "1.0"
+name: "Undeclared Endpoint Scenario"
+
+endpoints:
+  - id: 1
+    name: "sender"
+    type: "mock"
+
+steps:
+  - action: "send"
+    endpoint: 99
+    payload_text: "LOST"
+"#;
+
+    let mut runner = ScenarioRunner::from_yaml(yaml).expect("scenario should parse");
+    let report = runner.run().await;
+    assert!(!report.success, "send to undeclared endpoint must fail");
+    assert!(
+        report.error.unwrap().contains("undeclared endpoint 99"),
+        "error should identify the undeclared endpoint"
+    );
 }
 
 #[tokio::test]

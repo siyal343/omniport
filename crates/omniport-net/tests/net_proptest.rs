@@ -1,6 +1,6 @@
 use omniport_core::PinState;
 use omniport_net::rfc2217::{
-    modem_state_to_pin_state, pin_state_to_control, Rfc2217Codec, Rfc2217Command,
+    Rfc2217Codec, Rfc2217Command, modem_state_to_pin_state, pin_state_to_control,
 };
 use proptest::prelude::*;
 

@@ -1,3 +1,14 @@
+// STALE — NOT COMPILED. This file is retained only as historical design input.
+//
+// The authoritative control-plane schema is `crates/omniport-proto/src/types.rs`
+// (Request/Response), framed by the 4-byte length-prefixed JSON codec in
+// `crates/omniport-proto/src/codec.rs`. The design-only .proto that mirrors it
+// lives at `crates/omniport-proto/proto/omniport.proto`.
+//
+// This copy disagrees with both on several points (field names, endpoint id
+// width, missing Health/RemoveRoute/Shutdown RPCs, error shape). Do not edit it
+// expecting runtime behaviour to change; delete it when the gRPC migration is
+// either picked up or dropped.
 syntax = "proto3";
 package omniport.v1;
 

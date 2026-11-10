@@ -63,6 +63,15 @@ impl DaemonEngine {
     }
 
     pub async fn handle_request(&self, req: Request) -> Response {
+        // Once shutdown has been requested, stop admitting new control-plane
+        // work (the flag used to be written but never read).
+        if self.is_shutting_down.load(Ordering::SeqCst) && !matches!(req, Request::Shutdown) {
+            return Response::Error {
+                code: 503,
+                message: "omniportd is shutting down".to_string(),
+            };
+        }
+
         let mut state = self.state.lock().await;
 
         match req {
@@ -88,13 +97,37 @@ impl DaemonEngine {
                 port_b,
                 config,
             } => {
-                let pair_id = state.next_pair_id;
-                state.next_pair_id += 1;
-
+                // A u16 endpoint id space is only 65535 wide: reject instead of
+                // overflowing (debug panic / release wrap) after enough pairs.
                 let id_a = state.next_endpoint_id;
-                state.next_endpoint_id += 1;
-                let id_b = state.next_endpoint_id;
-                state.next_endpoint_id += 1;
+                let Some(id_b) = id_a.checked_add(1) else {
+                    return Response::Error {
+                        code: 503,
+                        message: "endpoint id space exhausted".to_string(),
+                    };
+                };
+                let Some(next_endpoint_id) = id_b.checked_add(1) else {
+                    return Response::Error {
+                        code: 503,
+                        message: "endpoint id space exhausted".to_string(),
+                    };
+                };
+                let Some(next_pair_id) = state.next_pair_id.checked_add(1) else {
+                    return Response::Error {
+                        code: 503,
+                        message: "virtual pair id space exhausted".to_string(),
+                    };
+                };
+                let Some(next_route_id) = state.next_route_id.checked_add(1) else {
+                    return Response::Error {
+                        code: 503,
+                        message: "route id space exhausted".to_string(),
+                    };
+                };
+
+                let pair_id = state.next_pair_id;
+                state.next_pair_id = next_pair_id;
+                state.next_endpoint_id = next_endpoint_id;
 
                 state.endpoints.insert(
                     id_a,
@@ -120,7 +153,7 @@ impl DaemonEngine {
 
                 // Add default bidirectional 1:1 route between the pair
                 let route_id = state.next_route_id;
-                state.next_route_id += 1;
+                state.next_route_id = next_route_id;
                 state.routes.insert(
                     route_id,
                     RouteEntry {
@@ -162,8 +195,38 @@ impl DaemonEngine {
                 target_ids,
                 bidirectional,
             } => {
+                // A route referencing nonexistent endpoints could never deliver
+                // frames; report that instead of claiming success.
+                if !state.endpoints.contains_key(&source_id) {
+                    return Response::Error {
+                        code: 404,
+                        message: format!("Endpoint {} not found", source_id),
+                    };
+                }
+                if target_ids.is_empty() {
+                    return Response::Error {
+                        code: 400,
+                        message: "AddRoute requires at least one target endpoint".to_string(),
+                    };
+                }
+                if let Some(missing) = target_ids
+                    .iter()
+                    .find(|id| !state.endpoints.contains_key(id))
+                {
+                    return Response::Error {
+                        code: 404,
+                        message: format!("Endpoint {} not found", missing),
+                    };
+                }
+
+                let Some(next_route_id) = state.next_route_id.checked_add(1) else {
+                    return Response::Error {
+                        code: 503,
+                        message: "route id space exhausted".to_string(),
+                    };
+                };
                 let route_id = state.next_route_id;
-                state.next_route_id += 1;
+                state.next_route_id = next_route_id;
                 state.routes.insert(
                     route_id,
                     RouteEntry {
@@ -201,5 +264,131 @@ impl DaemonEngine {
                 }
             }
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use omniport_proto::SerialConfigDto;
+
+    fn pair_request(a: &str, b: &str) -> Request {
+        Request::CreateVirtualPair {
+            port_a: a.to_string(),
+            port_b: b.to_string(),
+            config: SerialConfigDto::default(),
+        }
+    }
+
+    #[tokio::test]
+    async fn test_endpoint_id_exhaustion_returns_error_instead_of_panicking() {
+        let engine = DaemonEngine::new();
+
+        // Each pair consumes two u16 ids: 32767 pairs exhaust ids 1..=65534.
+        for i in 0..32_767 {
+            let a = format!("COM{}", i);
+            let b = format!("COM{}", i + 1);
+            let resp = engine.handle_request(pair_request(&a, &b)).await;
+            assert!(
+                matches!(resp, Response::VirtualPairCreated { .. }),
+                "unexpected response while filling id space: {:?}",
+                resp
+            );
+        }
+
+        // This request would overflow u16; it must be rejected, not panic.
+        let resp = engine.handle_request(pair_request("COMX", "COMY")).await;
+        match resp {
+            Response::Error { code, message } => {
+                assert_eq!(code, 503);
+                assert!(
+                    message.contains("exhausted"),
+                    "unexpected message: {message}"
+                );
+            }
+            other => panic!("expected 503 error on id exhaustion, got {other:?}"),
+        }
+
+        // No endpoint may have been registered for the rejected pair.
+        let state = engine.state.lock().await;
+        assert_eq!(state.endpoints.len(), 32_767 * 2);
+    }
+
+    #[tokio::test]
+    async fn test_requests_are_rejected_during_shutdown() {
+        let engine = DaemonEngine::new();
+        let resp = engine.handle_request(Request::Shutdown).await;
+        assert!(matches!(resp, Response::Success { .. }));
+        assert!(engine.is_shutting_down.load(Ordering::SeqCst));
+
+        // Health checks and mutations must not be served after shutdown.
+        for req in [Request::HealthCheck, Request::ListEndpoints] {
+            let resp = engine.handle_request(req).await;
+            assert!(
+                matches!(resp, Response::Error { code: 503, .. }),
+                "expected 503 during shutdown, got {resp:?}"
+            );
+        }
+
+        // A repeated Shutdown is idempotent (still success).
+        let resp = engine.handle_request(Request::Shutdown).await;
+        assert!(matches!(resp, Response::Success { .. }));
+    }
+
+    #[tokio::test]
+    async fn test_add_route_rejects_unknown_endpoints() {
+        let engine = DaemonEngine::new();
+
+        let resp = engine
+            .handle_request(Request::AddRoute {
+                source_id: 999,
+                target_ids: vec![2],
+                bidirectional: false,
+            })
+            .await;
+        match resp {
+            Response::Error { code, message } => {
+                assert_eq!(code, 404);
+                assert!(message.contains("999"), "unexpected message: {message}");
+            }
+            other => panic!("expected 404 for unknown source, got {other:?}"),
+        }
+
+        // Create one real endpoint, then reference a missing target.
+        engine.handle_request(pair_request("COM1", "COM2")).await;
+        let resp = engine
+            .handle_request(Request::AddRoute {
+                source_id: 1,
+                target_ids: vec![2, 4242],
+                bidirectional: false,
+            })
+            .await;
+        match resp {
+            Response::Error { code, message } => {
+                assert_eq!(code, 404);
+                assert!(message.contains("4242"), "unexpected message: {message}");
+            }
+            other => panic!("expected 404 for unknown target, got {other:?}"),
+        }
+
+        // Empty target list is a client error, not a silent no-op route.
+        let resp = engine
+            .handle_request(Request::AddRoute {
+                source_id: 1,
+                target_ids: vec![],
+                bidirectional: false,
+            })
+            .await;
+        assert!(matches!(resp, Response::Error { code: 400, .. }));
+
+        // A valid route is still accepted.
+        let resp = engine
+            .handle_request(Request::AddRoute {
+                source_id: 1,
+                target_ids: vec![2],
+                bidirectional: true,
+            })
+            .await;
+        assert!(matches!(resp, Response::RouteAdded { success: true, .. }));
     }
 }

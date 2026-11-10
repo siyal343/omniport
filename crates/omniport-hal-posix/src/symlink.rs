@@ -34,7 +34,9 @@ impl SymlinkGuard {
     }
 
     fn cleanup(&mut self) -> Result<()> {
-        if self.active && (self.link_path.exists() || is_symlink_path(&self.link_path)) {
+        // Only unlink the path while it still points at *our* target: another
+        // SymlinkManager (or the user) may have replaced it since creation.
+        if self.active && link_points_to(&self.link_path, &self.target) {
             std::fs::remove_file(&self.link_path).map_err(|e| HalError::Symlink {
                 link: self.link_path.clone(),
                 target: self.target.clone(),
@@ -49,6 +51,22 @@ impl Drop for SymlinkGuard {
     fn drop(&mut self) {
         let _ = self.cleanup();
     }
+}
+
+/// Returns `true` if `link` currently resolves to `target`.
+///
+/// `Path::exists` must not be used here: it follows the link and reports false
+/// for a dangling symlink, while a plain `remove_file` would delete a link that
+/// now belongs to someone else.
+fn link_points_to(link: &Path, target: &Path) -> bool {
+    if let Ok(resolved) = std::fs::read_link(link) {
+        return resolved == target;
+    }
+    // Windows fallback (no symlink privilege): the link is a marker file whose
+    // contents are the target path.
+    std::fs::read(link)
+        .map(|contents| contents == target.as_os_str().to_string_lossy().as_bytes())
+        .unwrap_or(false)
 }
 
 fn is_symlink_path(path: &Path) -> bool {
@@ -156,6 +174,50 @@ mod tests {
 
         guard.remove().expect("explicit remove");
         assert!(!link.exists());
+    }
+
+    #[test]
+    fn test_guard_does_not_delete_link_owned_by_newer_guard() {
+        let temp_dir = tempfile::tempdir().expect("tempdir");
+        let target1 = temp_dir.path().join("slave_a");
+        let target2 = temp_dir.path().join("slave_b");
+        let link = temp_dir.path().join("shared_link");
+
+        std::fs::write(&target1, b"slave-a").expect("write target1");
+        std::fs::write(&target2, b"slave-b").expect("write target2");
+
+        let guard1 = SymlinkManager::create(&target1, &link).expect("create link 1");
+        let guard2 = SymlinkManager::create(&target2, &link).expect("replace link with target2");
+
+        // Dropping the older guard must leave the newer guard's link intact.
+        guard1.remove().expect("remove guard1");
+        assert!(
+            link_points_to(&link, &target2),
+            "older guard deleted the newer guard's link"
+        );
+
+        guard2.remove().expect("remove guard2");
+        assert!(!link.exists() && !is_symlink_path(&link));
+    }
+
+    #[test]
+    fn test_guard_leaves_foreign_file_at_link_path_untouched() {
+        let temp_dir = tempfile::tempdir().expect("tempdir");
+        let target = temp_dir.path().join("slave");
+        let link = temp_dir.path().join("replaced_link");
+
+        std::fs::write(&target, b"slave").expect("write target");
+        let guard = SymlinkManager::create(&target, &link).expect("create link");
+
+        // Simulate the user replacing the symlink with their own file.
+        std::fs::remove_file(&link).expect("unlink");
+        std::fs::write(&link, b"important user data").expect("write user file");
+
+        drop(guard);
+        assert_eq!(
+            std::fs::read(&link).expect("user file must survive"),
+            b"important user data"
+        );
     }
 
     #[test]

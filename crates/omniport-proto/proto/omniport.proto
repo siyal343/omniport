@@ -1,3 +1,8 @@
+// NOTE: design-only. This file is not referenced by any build script and no
+// Protobuf/gRPC code is generated from it. The runtime control plane uses the
+// 4-byte length-prefixed JSON codec in src/codec.rs, and the Request/Response
+// enums in src/types.rs are the authoritative schema. Keep this file in sync
+// with types.rs if the gRPC migration is picked up again.
 syntax = "proto3";
 
 package omniport;

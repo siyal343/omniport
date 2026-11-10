@@ -13,4 +13,4 @@ pub mod sandbox;
 pub use endpoint::ScriptEndpoint;
 pub use engine::{ScriptConfig, ScriptEngine};
 pub use error::{Result, ScriptError};
-pub use fuel::{FuelMeter, DEFAULT_CHECK_INTERVAL, DEFAULT_MAX_FUEL};
+pub use fuel::{DEFAULT_CHECK_INTERVAL, DEFAULT_MAX_FUEL, FuelMeter};

@@ -5,7 +5,6 @@ pub mod error;
 pub mod pty;
 pub mod symlink;
 pub mod termios;
-pub mod throttler;
 
 pub use cuse::{
     CuseEndpoint, SerialCounters, SerialIoctlHandler, TCSBRK, TIOCGICOUNT, TIOCM_CAR, TIOCM_CD,
@@ -13,7 +12,7 @@ pub use cuse::{
     TIOCMGET, TIOCMIWAIT, TIOCMSET, TIOCSBRK, pin_state_to_tiocm, tiocm_to_pin_state,
 };
 pub use error::{HalError, Result};
+pub use omniport_core::{TokenBucketThrottler, calculate_byte_rate};
 pub use pty::PtyEndpoint;
 pub use symlink::{SymlinkGuard, SymlinkManager};
 pub use termios::TermiosPoller;
-pub use throttler::{TokenBucketThrottler, calculate_byte_rate};

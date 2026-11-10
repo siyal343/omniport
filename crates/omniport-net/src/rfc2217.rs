@@ -11,6 +11,11 @@ pub const SE: u8 = 240;
 
 pub const COM_PORT_OPTION: u8 = 44;
 
+/// Upper bound for a single RFC 2217 subnegotiation payload. A peer that opens
+/// `IAC SB 44 ...` and never sends `IAC SE` must not be able to grow the
+/// decoder's buffer without bound (remote memory-exhaustion DoS).
+pub const MAX_SUBNEG_LEN: usize = 1024;
+
 // RFC 2217 Command Codes
 pub const CMD_SET_BAUDRATE: u8 = 1;
 pub const CMD_SET_DATASIZE: u8 = 2;
@@ -60,6 +65,9 @@ enum ParserState {
 pub struct Rfc2217Codec {
     state: ParserState,
     subneg_buf: Vec<u8>,
+    /// Set once a subnegotiation exceeds `MAX_SUBNEG_LEN`; bytes are discarded
+    /// until the terminating `IAC SE` resynchronises the stream.
+    subneg_overflow: bool,
 }
 
 impl Default for Rfc2217Codec {
@@ -73,7 +81,13 @@ impl Rfc2217Codec {
         Self {
             state: ParserState::Data,
             subneg_buf: Vec::with_capacity(64),
+            subneg_overflow: false,
         }
+    }
+
+    /// Number of bytes currently buffered for an in-flight subnegotiation
+    pub fn pending_subnegotiation_len(&self) -> usize {
+        self.subneg_buf.len()
     }
 }
 
@@ -161,10 +175,7 @@ impl Rfc2217Codec {
     }
 
     /// Decodes a stream chunk, extracting unescaped data bytes and recognized RFC 2217 commands
-    pub fn decode_chunk(
-        &mut self,
-        chunk: &[u8],
-    ) -> (Vec<u8>, Vec<Rfc2217Command>, Vec<(u8, u8)>) {
+    pub fn decode_chunk(&mut self, chunk: &[u8]) -> (Vec<u8>, Vec<Rfc2217Command>, Vec<(u8, u8)>) {
         let mut clean_data = Vec::with_capacity(chunk.len());
         let mut commands = Vec::new();
         let mut negotiations = Vec::new();
@@ -188,6 +199,7 @@ impl Rfc2217Codec {
                     }
                     SB => {
                         self.subneg_buf.clear();
+                        self.subneg_overflow = false;
                         self.state = ParserState::Subneg;
                     }
                     _ => {
@@ -201,20 +213,35 @@ impl Rfc2217Codec {
                 ParserState::Subneg => {
                     if byte == IAC {
                         self.state = ParserState::SubnegIac;
-                    } else {
+                    } else if !self.subneg_overflow {
                         self.subneg_buf.push(byte);
+                        if self.subneg_buf.len() > MAX_SUBNEG_LEN {
+                            // Bound memory: drop the oversized payload and keep
+                            // discarding until the closing IAC SE.
+                            self.subneg_buf.clear();
+                            self.subneg_overflow = true;
+                        }
                     }
                 }
                 ParserState::SubnegIac => {
                     if byte == SE {
-                        // Subnegotiation ended: parse buffer
-                        if let Some(cmd) = parse_subneg(&self.subneg_buf) {
+                        // Subnegotiation ended: parse buffer unless it overflowed
+                        if !self.subneg_overflow
+                            && let Some(cmd) = parse_subneg(&self.subneg_buf)
+                        {
                             commands.push(cmd);
                         }
                         self.subneg_buf.clear();
+                        self.subneg_overflow = false;
                         self.state = ParserState::Data;
                     } else if byte == IAC {
-                        self.subneg_buf.push(IAC);
+                        if !self.subneg_overflow {
+                            self.subneg_buf.push(IAC);
+                            if self.subneg_buf.len() > MAX_SUBNEG_LEN {
+                                self.subneg_buf.clear();
+                                self.subneg_overflow = true;
+                            }
+                        }
                         self.state = ParserState::Subneg;
                     } else {
                         self.state = ParserState::Subneg;
@@ -268,27 +295,33 @@ pub fn pin_state_to_control(new_pins: PinState, old_pins: PinState) -> Vec<Rfc22
     let mut cmds = Vec::new();
 
     if new_pins.contains(PinState::DTR) != old_pins.contains(PinState::DTR) {
-        cmds.push(Rfc2217Command::SetControl(if new_pins.contains(PinState::DTR) {
-            CONTROL_DTR_ON
-        } else {
-            CONTROL_DTR_OFF
-        }));
+        cmds.push(Rfc2217Command::SetControl(
+            if new_pins.contains(PinState::DTR) {
+                CONTROL_DTR_ON
+            } else {
+                CONTROL_DTR_OFF
+            },
+        ));
     }
 
     if new_pins.contains(PinState::RTS) != old_pins.contains(PinState::RTS) {
-        cmds.push(Rfc2217Command::SetControl(if new_pins.contains(PinState::RTS) {
-            CONTROL_RTS_ON
-        } else {
-            CONTROL_RTS_OFF
-        }));
+        cmds.push(Rfc2217Command::SetControl(
+            if new_pins.contains(PinState::RTS) {
+                CONTROL_RTS_ON
+            } else {
+                CONTROL_RTS_OFF
+            },
+        ));
     }
 
     if new_pins.contains(PinState::BREAK) != old_pins.contains(PinState::BREAK) {
-        cmds.push(Rfc2217Command::SetControl(if new_pins.contains(PinState::BREAK) {
-            CONTROL_BREAK_REQ
-        } else {
-            CONTROL_BREAK_CLR
-        }));
+        cmds.push(Rfc2217Command::SetControl(
+            if new_pins.contains(PinState::BREAK) {
+                CONTROL_BREAK_REQ
+            } else {
+                CONTROL_BREAK_CLR
+            },
+        ));
     }
 
     cmds
@@ -342,13 +375,44 @@ mod tests {
         // 1. Encode SET_BAUDRATE 115200
         let cmd = Rfc2217Command::SetBaudrate(115200);
         let bytes = Rfc2217Codec::encode_command(&cmd);
-        assert_eq!(&bytes[..5], &[IAC, SB, COM_PORT_OPTION, CMD_SET_BAUDRATE, 0x00]);
+        assert_eq!(
+            &bytes[..5],
+            &[IAC, SB, COM_PORT_OPTION, CMD_SET_BAUDRATE, 0x00]
+        );
 
         // 2. Decode it back
         let (data, cmds, _) = codec.decode_chunk(&bytes);
         assert!(data.is_empty());
         assert_eq!(cmds.len(), 1);
         assert_eq!(cmds[0], Rfc2217Command::SetBaudrate(115200));
+    }
+
+    #[test]
+    fn test_subnegotiation_buffer_is_bounded_against_unterminated_input() {
+        let mut codec = Rfc2217Codec::new();
+
+        // Open a subnegotiation, then flood it without ever sending IAC SE.
+        codec.decode_chunk(&[IAC, SB, COM_PORT_OPTION, CMD_SET_CONTROL]);
+        let junk = vec![0x41u8; 100_000];
+        for chunk in junk.chunks(4096) {
+            codec.decode_chunk(chunk);
+        }
+
+        assert!(
+            codec.pending_subnegotiation_len() <= MAX_SUBNEG_LEN,
+            "subnegotiation buffer grew to {} bytes (limit {})",
+            codec.pending_subnegotiation_len(),
+            MAX_SUBNEG_LEN
+        );
+
+        // The oversized command is discarded, and the stream resynchronises.
+        let (data, cmds, _) = codec.decode_chunk(&[IAC, SE]);
+        assert!(data.is_empty());
+        assert!(cmds.is_empty(), "oversized subnegotiation must be dropped");
+
+        let (data, cmds, _) = codec.decode_chunk(b"OK");
+        assert_eq!(&data[..], b"OK");
+        assert!(cmds.is_empty());
     }
 
     #[test]

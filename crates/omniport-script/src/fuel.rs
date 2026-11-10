@@ -1,6 +1,6 @@
 use mlua::{HookTriggers, Lua, Result, VmState};
-use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
+use std::sync::atomic::{AtomicU64, Ordering};
 
 pub const DEFAULT_MAX_FUEL: u64 = 100_000;
 pub const DEFAULT_CHECK_INTERVAL: u32 = 100;

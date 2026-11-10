@@ -85,7 +85,10 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             Ok(r) => r,
             Err(e) => {
                 if cli.json {
-                    println!("{}", serde_json::json!({ "success": false, "error": e.to_string() }));
+                    println!(
+                        "{}",
+                        serde_json::json!({ "success": false, "error": e.to_string() })
+                    );
                 } else {
                     eprintln!("Failed to load scenario '{:?}': {}", file, e);
                 }
