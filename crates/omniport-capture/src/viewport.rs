@@ -1,7 +1,7 @@
 //! ICD Section 2 viewport wire format — the single owner of the layout.
 //!
 //! The dual-mmap capture store exposes a window of rows to the GUI through a
-//! binary batch whose layout is specified in `internal_docs/ICD.md` §2:
+//! binary batch whose layout is specified in `docs/ICD.md` §2:
 //!
 //! ```text
 //! [total_packets: u64][returned_rows: u32][reserved: u32]

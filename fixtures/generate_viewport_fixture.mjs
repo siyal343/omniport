@@ -248,7 +248,7 @@ const fixture = {
   row_header_bytes: ROW_HEADER_BYTES,
   endianness: "little",
   description:
-    "Wire format from internal_docs/ICD.md Section 2: [total_packets: u64][returned_rows: u32][reserved: u32], then returned_rows * ([FrameIndexEntry: 24B][payload: payload_len bytes]). u64 values are decimal strings so JavaScript cannot lose precision.",
+    "Wire format from docs/ICD.md Section 2: [total_packets: u64][returned_rows: u32][reserved: u32], then returned_rows * ([FrameIndexEntry: 24B][payload: payload_len bytes]). u64 values are decimal strings so JavaScript cannot lose precision.",
   cases: CASES,
 };
 

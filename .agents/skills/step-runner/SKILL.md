@@ -8,7 +8,7 @@ Advance the OmniPort build by executing exactly ONE step from `docs/PROGRESS.md`
 
 # Instructions
 1. **Inspect State:** Read `docs/PROGRESS.md` and identify the current active Step (or the step requested by the user).
-2. **Consult Specs:** Read the relevant requirement IDs in `internal_docs/SRS.md` and wire layouts in `internal_docs/ICD.md`.
+2. **Consult Specs:** Read the relevant requirement IDs in `docs/SRS.md`, wire layouts in `docs/ICD.md`, and accepted decisions in `docs/adr/`.
 3. **Formulate Implementation Plan:** Present a concise, file-by-file plan for the step (traits, structs, algorithms, and unit tests to add).
 4. **Implement & Verify:**
    - Write the implementation code and unit/property tests.

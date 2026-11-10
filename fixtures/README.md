@@ -1,7 +1,7 @@
 # Viewport wire-format contract fixture
 
 `viewport_v1.json` is the frozen, independent oracle for the ICD §2 viewport
-batch format (`internal_docs/ICD.md` §2) — the binary payload of the Tauri
+batch format (`docs/ICD.md` §2) — the binary payload of the Tauri
 `fetch_viewport_rows` command.
 
 It exists because the same layout used to be transcribed by hand in five places:
