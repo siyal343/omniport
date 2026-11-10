@@ -18,6 +18,12 @@ export interface TelemetryStripChartProps {
    * strip synthesizes a waveform but is clearly labelled as demo data.
    */
   isDemo?: boolean;
+  /**
+   * True when the Tauri host is serving its seeded demo session. The strip
+   * still derives metrics from fetched viewport rows, but labels the source as
+   * demo so it never claims live traffic while the toolbar shows DEMO STREAM.
+   */
+  hostDemoMode?: boolean;
 }
 
 const WINDOW_SECONDS = 10;
@@ -33,6 +39,7 @@ export const TelemetryStripChart: React.FC<TelemetryStripChartProps> = ({
   theme = darkTheme,
   rows = [],
   isDemo = false,
+  hostDemoMode = false,
 }) => {
   const containerRef = useRef<HTMLDivElement>(null);
   const uplotRef = useRef<uPlot | null>(null);
@@ -274,15 +281,19 @@ export const TelemetryStripChart: React.FC<TelemetryStripChartProps> = ({
           <span
             data-testid="telemetry-source"
             style={{
-              color: isDemo ? "#d29922" : theme.rxText,
-              border: `1px solid ${isDemo ? "#d29922" : theme.rxText}`,
+              color: isDemo || hostDemoMode ? "#d29922" : theme.rxText,
+              border: `1px solid ${isDemo || hostDemoMode ? "#d29922" : theme.rxText}`,
               borderRadius: 3,
               padding: "0 4px",
               fontSize: 9,
               letterSpacing: "0.4px",
             }}
           >
-            {isDemo ? "DEMO STREAM" : "LIVE · VIEWPORT-DERIVED"}
+            {isDemo
+              ? "DEMO STREAM"
+              : hostDemoMode
+                ? "DEMO · VIEWPORT-DERIVED"
+                : "LIVE · VIEWPORT-DERIVED"}
           </span>
           <span style={{ color: theme.txText }}>● Rate: {activeRate} pkt/s</span>
           <span style={{ color: theme.rxText }}>● Throughput: {activeThroughput} KB/s</span>

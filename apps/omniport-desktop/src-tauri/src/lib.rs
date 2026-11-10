@@ -3,11 +3,10 @@
 pub mod commands;
 
 pub use commands::{
-    MAX_VIEWPORT_ROWS, CaptureStatus, fetch_viewport_binary, fetch_viewport_rows, capture_status,
-    AppCaptureState,
+    AppCaptureState, CaptureStatus, MAX_VIEWPORT_ROWS, capture_status, fetch_viewport_binary,
+    fetch_viewport_rows,
 };
 use omniport_capture::MmapCaptureEngine;
-use std::sync::RwLock;
 
 /// Size of the desktop viewport ring: 100k frames / 16 MiB of payload data.
 const DESKTOP_MAX_PACKETS: u64 = 100_000;
@@ -23,9 +22,7 @@ fn create_capture_engine() -> std::io::Result<MmapCaptureEngine> {
     match MmapCaptureEngine::create(&capture_dir, DESKTOP_MAX_PACKETS, DESKTOP_MAX_DATA_BYTES) {
         Ok(engine) => Ok(engine),
         Err(_primary_err) => {
-            let fallback_dir = std::env::current_dir()?
-                .join("target")
-                .join("desktop_mmap");
+            let fallback_dir = std::env::current_dir()?.join("target").join("desktop_mmap");
             std::fs::create_dir_all(&fallback_dir)?;
             MmapCaptureEngine::create(&fallback_dir, DESKTOP_MAX_PACKETS, DESKTOP_MAX_DATA_BYTES)
         }
@@ -64,26 +61,59 @@ fn seed_demo_session(engine: &mut MmapCaptureEngine) {
 /// is connected. They must never masquerade as live traffic in a release build:
 /// debug builds seed by default, release builds only when `OMNIPORT_DESKTOP_DEMO=1`,
 /// and either can opt out with `OMNIPORT_DESKTOP_DEMO=0`.
-fn demo_session_enabled() -> bool {
-    match std::env::var("OMNIPORT_DESKTOP_DEMO").ok().as_deref() {
+fn demo_session_enabled_from(var: Option<&str>, is_debug: bool) -> bool {
+    match var {
         Some("0") | Some("false") | Some("off") => false,
         Some(_) => true,
-        None => cfg!(debug_assertions),
+        None => is_debug,
+    }
+}
+
+fn demo_session_enabled() -> bool {
+    demo_session_enabled_from(
+        std::env::var("OMNIPORT_DESKTOP_DEMO").ok().as_deref(),
+        cfg!(debug_assertions),
+    )
+}
+
+/// Optional fault-injection hook (`OMNIPORT_DESKTOP_DISCONNECT=1`) so smoke
+/// tests can verify the WebView's `CAPTURE DISCONNECTED` banner against a real
+/// failed Tauri host IPC response.
+fn forced_disconnect_reason(var: Option<&str>) -> Option<String> {
+    match var {
+        None | Some("") | Some("0") | Some("false") | Some("off") => None,
+        Some("1") | Some("true") | Some("on") => {
+            Some("Host capture store disconnected (OMNIPORT_DESKTOP_DISCONNECT)".to_string())
+        }
+        Some(custom) => Some(custom.to_string()),
+    }
+}
+
+fn build_capture_state() -> AppCaptureState {
+    if let Some(reason) =
+        forced_disconnect_reason(std::env::var("OMNIPORT_DESKTOP_DISCONNECT").ok().as_deref())
+    {
+        return AppCaptureState::disconnected(reason);
+    }
+
+    match create_capture_engine() {
+        Ok(mut engine) => {
+            let demo_mode = demo_session_enabled();
+            if demo_mode {
+                seed_demo_session(&mut engine);
+            }
+            AppCaptureState::connected(engine, demo_mode)
+        }
+        Err(err) => {
+            AppCaptureState::disconnected(format!("Failed to open desktop capture store: {err}"))
+        }
     }
 }
 
 /// Boots the Tauri workbench. Returns an error instead of panicking so the
 /// binary can report a nonzero exit status to the OS on startup failure.
 pub fn run() -> Result<(), Box<dyn std::error::Error>> {
-    let mut engine = create_capture_engine()?;
-    let demo_mode = demo_session_enabled();
-    if demo_mode {
-        seed_demo_session(&mut engine);
-    }
-    let app_state = AppCaptureState {
-        engine: RwLock::new(engine),
-        demo_mode,
-    };
+    let app_state = build_capture_state();
 
     let app = tauri::Builder::default()
         .manage(app_state)
@@ -118,5 +148,29 @@ mod tests {
         engine.read_viewport(0, 1, &mut wire);
         assert!(wire.len() > 16);
         let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn test_demo_session_enabled_respects_profile_and_env() {
+        assert!(!demo_session_enabled_from(None, false));
+        assert!(demo_session_enabled_from(None, true));
+        assert!(!demo_session_enabled_from(Some("0"), true));
+        assert!(!demo_session_enabled_from(Some("false"), true));
+        assert!(!demo_session_enabled_from(Some("off"), true));
+        assert!(demo_session_enabled_from(Some("1"), false));
+        assert!(demo_session_enabled_from(Some("true"), false));
+    }
+
+    #[test]
+    fn test_forced_disconnect_reason_parses_env() {
+        assert_eq!(forced_disconnect_reason(None), None);
+        assert_eq!(forced_disconnect_reason(Some("")), None);
+        assert_eq!(forced_disconnect_reason(Some("0")), None);
+        assert_eq!(forced_disconnect_reason(Some("false")), None);
+        assert!(forced_disconnect_reason(Some("1")).is_some());
+        assert_eq!(
+            forced_disconnect_reason(Some("custom fault")).as_deref(),
+            Some("custom fault")
+        );
     }
 }

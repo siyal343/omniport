@@ -109,10 +109,12 @@ export const HexMonitorCanvas: React.FC<HexMonitorCanvasProps> = ({
   const contentHeight = Math.max(0, visibleHeight - headerHeight);
   const maxScroll = computeScrollMax(totalRows, rowHeight, contentHeight);
 
-  // Report the scrollable row-area height to the window owner (session).
+  // Report the scrollable row-area height to the window owner (session) once
+  // ResizeObserver has measured a real container box.
   useEffect(() => {
+    if (dimensions.width <= 0 || dimensions.height <= 0) return;
     onViewportResizeRef.current?.(contentHeight);
-  }, [contentHeight]);
+  }, [contentHeight, dimensions.width, dimensions.height]);
 
   // ResizeObserver: mounted once. Deferring the state update to rAF avoids
   // "ResizeObserver loop completed with undelivered notifications".

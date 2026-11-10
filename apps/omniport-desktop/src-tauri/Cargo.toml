@@ -12,11 +12,16 @@ crate-type = ["staticlib", "cdylib", "rlib"]
 name = "omniport-desktop"
 path = "src/main.rs"
 
+[features]
+# Activated automatically by `tauri build` so production binaries embed `../dist`
+# while `tauri dev` and `cargo test` use `devUrl` without requiring `../dist`.
+custom-protocol = ["tauri/custom-protocol"]
+
 [dependencies]
 omniport-core = { path = "../../../crates/omniport-core" }
 omniport-capture = { path = "../../../crates/omniport-capture" }
 omniport-dissect = { path = "../../../crates/omniport-dissect" }
-tauri = { version = "2.2", features = ["custom-protocol", "devtools"] }
+tauri = { version = "2.2", features = ["devtools"] }
 serde = { version = "1.0", features = ["derive"] }
 serde_json = "1.0"
 bytes = "1.9"

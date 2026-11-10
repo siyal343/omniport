@@ -1,6 +1,6 @@
 use omniport_capture::MmapCaptureEngine;
 use std::sync::RwLock;
-use tauri::{ipc::Response, State};
+use tauri::{State, ipc::Response};
 
 /// Re-exported so the GUI/Tauri layer shares the capture crate's single limit.
 pub use omniport_capture::viewport::MAX_VIEWPORT_ROWS;
@@ -9,7 +9,7 @@ pub use omniport_capture::viewport::MAX_VIEWPORT_ROWS;
 ///
 /// `demo_mode` lets the UI label a seeded/fixture session as demo data instead of
 /// presenting it as live hardware traffic.
-#[derive(Debug, Clone, Copy, serde::Serialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize)]
 pub struct CaptureStatus {
     pub demo_mode: bool,
     pub total_packets: u64,
@@ -17,8 +17,40 @@ pub struct CaptureStatus {
 }
 
 pub struct AppCaptureState {
-    pub engine: RwLock<MmapCaptureEngine>,
+    pub engine: RwLock<Result<MmapCaptureEngine, String>>,
     pub demo_mode: bool,
+}
+
+impl AppCaptureState {
+    pub fn connected(engine: MmapCaptureEngine, demo_mode: bool) -> Self {
+        Self {
+            engine: RwLock::new(Ok(engine)),
+            demo_mode,
+        }
+    }
+
+    pub fn disconnected(reason: impl Into<String>) -> Self {
+        Self {
+            engine: RwLock::new(Err(reason.into())),
+            demo_mode: false,
+        }
+    }
+
+    pub fn read_viewport(&self, start_row: u64, row_count: usize) -> Result<Vec<u8>, String> {
+        let guard = self.engine.read().map_err(|e| e.to_string())?;
+        let engine = guard.as_ref().map_err(Clone::clone)?;
+        Ok(fetch_viewport_binary(engine, start_row, row_count))
+    }
+
+    pub fn status(&self) -> Result<CaptureStatus, String> {
+        let guard = self.engine.read().map_err(|e| e.to_string())?;
+        let engine = guard.as_ref().map_err(Clone::clone)?;
+        Ok(CaptureStatus {
+            demo_mode: self.demo_mode,
+            total_packets: engine.packet_count(),
+            dropped_frames: engine.dropped_frames(),
+        })
+    }
 }
 
 /// Tauri IPC command to fetch a visible row slice from the dual-mmap capture store.
@@ -29,20 +61,14 @@ pub fn fetch_viewport_rows(
     start_row: u64,
     row_count: usize,
 ) -> Result<Response, String> {
-    let engine = state.engine.read().map_err(|e| e.to_string())?;
-    let raw_wire_buf = fetch_viewport_binary(&engine, start_row, row_count);
+    let raw_wire_buf = state.read_viewport(start_row, row_count)?;
     Ok(Response::new(raw_wire_buf))
 }
 
 /// Tauri IPC command describing the capture session behind `fetch_viewport_rows`.
 #[tauri::command]
 pub fn capture_status(state: State<'_, AppCaptureState>) -> Result<CaptureStatus, String> {
-    let engine = state.engine.read().map_err(|e| e.to_string())?;
-    Ok(CaptureStatus {
-        demo_mode: state.demo_mode,
-        total_packets: engine.packet_count(),
-        dropped_frames: engine.dropped_frames(),
-    })
+    state.status()
 }
 
 /// Serializes the visible capture window as the ICD §2 binary viewport batch.
@@ -166,7 +192,8 @@ mod tests {
     fn test_fetch_viewport_binary_clamps_to_max_rows() {
         let dir = tempdir().unwrap();
         let max_packets = MAX_VIEWPORT_ROWS as u64 + 100;
-        let mut engine = MmapCaptureEngine::create(dir.path(), max_packets, max_packets * 4).unwrap();
+        let mut engine =
+            MmapCaptureEngine::create(dir.path(), max_packets, max_packets * 4).unwrap();
         for i in 0..max_packets {
             engine.append_event(&SerialEvent {
                 timestamp_ns: i,
@@ -182,5 +209,18 @@ mod tests {
         let returned = u32::from_le_bytes(wire[8..12].try_into().unwrap());
         assert_eq!(total, max_packets);
         assert_eq!(returned, MAX_VIEWPORT_ROWS as u32);
+    }
+
+    #[test]
+    fn test_app_capture_state_disconnected_surfaces_error() {
+        let state = AppCaptureState::disconnected("host capture store unavailable");
+        assert_eq!(
+            state.read_viewport(0, 10).unwrap_err(),
+            "host capture store unavailable"
+        );
+        assert_eq!(
+            state.status().unwrap_err(),
+            "host capture store unavailable"
+        );
     }
 }
