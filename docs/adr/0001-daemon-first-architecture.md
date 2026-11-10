@@ -1,6 +1,6 @@
 # ADR-0001: Daemon-first architecture
 
-- **Status:** Accepted
+- **Status:** Superseded by [ADR-0008](0008-json-tcp-daemon-control-plane.md)
 
 ## Decision
 
@@ -10,7 +10,9 @@ stateless clients, so closing a client never drops active virtual serial ports.
 
 ## Implementation status
 
-As of the 2026-11-10 audit the control plane is a 4-byte length-prefixed JSON codec
-over TCP, and the desktop host still owns an in-process capture store rather than
-being a daemon client. See `docs/AUDIT_2026-11-10.md` §8 and Phase 6 steps 6.4/6.5
-in `docs/PROGRESS.md`.
+Superseded by [ADR-0008](0008-json-tcp-daemon-control-plane.md) (Phase 6 steps
+6.4, 6.5, and 6.8): daemon-first separation stands, `omniport-desktop` connects
+through the `CaptureStore` seam (`DaemonCaptureStore` default in release builds),
+the legacy `.proto` drafts are deleted, and the shipped control plane is 4-byte
+big-endian length-prefixed JSON over TCP (`docs/ICD.md` §3). Unix Domain Socket
+/ Named Pipe transport remains a future local-IPC option.

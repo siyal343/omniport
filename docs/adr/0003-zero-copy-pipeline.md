@@ -1,6 +1,6 @@
 # ADR-0003: Zero-copy pipeline
 
-- **Status:** Accepted
+- **Status:** Superseded by [ADR-0009](0009-scoped-zero-copy-pipeline.md)
 
 ## Decision
 
@@ -9,8 +9,8 @@ during 1:N splitting and capture tapping.
 
 ## Scope note
 
-The 2026-11-10 audit found the guarantee is correctly held on the routing and
-capture-tapping paths, but not on viewport serialization: the ICD §2 batch copies
-each payload into the wire buffer (see ADR-0007). The decision text above should be
-scoped explicitly to routing/tapping; tracked as Phase 6 step 6.8 in
-`docs/PROGRESS.md`.
+Superseded by [ADR-0009](0009-scoped-zero-copy-pipeline.md) (Phase 6 step 6.8):
+`bytes::Bytes` zero-copy holds on routing, 1:N splitting, non-mutating fault
+pass-through, and capture-tap dispatch, while fault corruption, dual-mmap
+persistence, ICD §2 `ViewportBatch` serialization (ADR-0007), and control-plane
+base64/JSON framing copy payload bytes.
