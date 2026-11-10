@@ -431,3 +431,77 @@ export function createRouteEdgeForConnection(
     },
   };
 }
+
+/** HIL fault preset used by the route-scoped "Attach Fault" action. */
+export const ROUTE_FAULT_PRESET: FaultConfig = {
+  enabled: true,
+  fixedDelayMs: 5,
+  gaussianJitterMeanMs: 2,
+  gaussianJitterStdDevMs: 1.5,
+  bitErrorRate: 1e-4,
+  burstErrorProb: 0.01,
+  corruptNthCrc: 0,
+};
+
+/** UI ms-based fault config -> canonical wire fault (inverse of wireFaultToUiConfig). */
+export function uiFaultToWireConfig(config: FaultConfig): WireFaultConfig {
+  const toDuration = (ms: number): WireDuration => ({
+    secs: Math.floor(ms / 1000),
+    nanos: Math.round((ms % 1000) * 1_000_000),
+  });
+  return {
+    fixed_delay: toDuration(config.fixedDelayMs),
+    jitter_mean: toDuration(config.gaussianJitterMeanMs),
+    jitter_std_dev: toDuration(config.gaussianJitterStdDevMs),
+    rate_limit_bps: null,
+    disconnected: false,
+    bit_error_rate: config.bitErrorRate,
+    gilbert_elliott:
+      config.burstErrorProb > 0
+        ? { p_gb: config.burstErrorProb, p_bg: 0.1, p_g: 0, p_b: 0.5 }
+        : null,
+    corrupt_nth_crc: config.corruptNthCrc > 0 ? config.corruptNthCrc : null,
+  };
+}
+
+/**
+ * Re-projects a canonical snapshot onto the interactive canvas while keeping
+ * every user-dragged node position (matched by node id). Nodes that no longer
+ * exist in the snapshot are dropped; brand-new nodes get a non-overlapping
+ * default slot. This prevents the graph from jumping after a mutation.
+ */
+export function mergeNodePositions(
+  projected: ReadonlyArray<OmniPortNode>,
+  previous: ReadonlyArray<OmniPortNode>
+): OmniPortNode[] {
+  const previousById = new Map(previous.map((node) => [node.id, node.position]));
+  const occupied = new Set(previous.map((node) => `${node.position.x}:${node.position.y}`));
+
+  return projected.map((node) => {
+    const kept = previousById.get(node.id);
+    if (kept) return { ...node, position: { ...kept } };
+
+    let { x, y } = node.position;
+    while (occupied.has(`${x}:${y}`)) x += 260;
+    occupied.add(`${x}:${y}`);
+    return { ...node, position: { x, y } };
+  });
+}
+
+/**
+ * Next free COM port names for a virtual pair: COM10/COM11, then COM12/COM13…
+ * (skips any pair already present in the canonical snapshot).
+ *
+ * Lives here (not in the demo adapter) because the live canvas computes the
+ * request for `create_virtual_pair`; the demo topology module must stay
+ * lazily-loaded in production builds.
+ */
+export function nextVirtualPairPortNames(snapshot: CanonicalTopologySnapshot): {
+  portA: string;
+  portB: string;
+} {
+  const used = new Set(snapshot.endpoints.map((endpoint) => endpoint.name));
+  let base = 10;
+  while (used.has(`COM${base}`) || used.has(`COM${base + 1}`)) base += 2;
+  return { portA: `COM${base}`, portB: `COM${base + 1}` };
+}

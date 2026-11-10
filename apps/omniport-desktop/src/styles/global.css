@@ -233,6 +233,12 @@ body {
   outline-offset: 2px;
 }
 
+.op-btn:disabled {
+  opacity: 0.45;
+  cursor: not-allowed;
+  filter: none;
+}
+
 /* ------------------------------------------------------------------ */
 /* Layout                                                              */
 /* ------------------------------------------------------------------ */
@@ -269,6 +275,52 @@ body {
 .op-hscroll {
   scrollbar-width: thin;
   scrollbar-color: var(--border-subtle) transparent;
+}
+
+/* Live topology RPC status overlays (Step 7.1). */
+.op-topology-status,
+.op-topology-busy,
+.op-topology-error {
+  position: absolute;
+  z-index: 10;
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  border-radius: 6px;
+  padding: 4px 8px;
+  font-family: var(--font-mono);
+  font-size: 11px;
+  font-variant-numeric: tabular-nums;
+  pointer-events: none;
+}
+
+.op-topology-status,
+.op-topology-busy {
+  top: 10px;
+  left: 10px;
+  color: var(--tp-muted, #8b949e);
+  background: var(--tp-node-bg, #161b22);
+  border: 1px solid var(--tp-border, #30363d);
+}
+
+.op-topology-busy {
+  color: #d29922;
+  letter-spacing: 0.5px;
+}
+
+.op-topology-error {
+  left: 50%;
+  bottom: 12px;
+  transform: translateX(-50%);
+  max-width: calc(100% - 24px);
+  color: #ffb3ae;
+  background: rgba(248, 81, 73, 0.14);
+  border: 1px solid rgba(248, 81, 73, 0.45);
+  pointer-events: auto;
+}
+
+.op-topology-error-text {
+  overflow-wrap: anywhere;
 }
 
 .op-hscroll::-webkit-scrollbar {

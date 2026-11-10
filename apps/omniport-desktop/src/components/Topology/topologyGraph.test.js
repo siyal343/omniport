@@ -9,7 +9,12 @@ import {
   createFaultNode,
   projectTopologySnapshot,
   createRouteEdgeForConnection,
+  mergeNodePositions,
+  uiFaultToWireConfig,
+  wireFaultToUiConfig,
+  ROUTE_FAULT_PRESET,
 } from "./topologyData.ts";
+import { createDemoTopologySnapshot } from "../../ipc/topologyModel.ts";
 
 const NODE_TYPES = new Set(["endpoint", "splitter", "merger", "fault"]);
 
@@ -184,4 +189,81 @@ test("createRouteEdgeForConnection resolves connected endpoint ids and rejects s
 
   assert.equal(createRouteEdgeForConnection({ source: ep4.id, target: ep4.id }, nodes), null);
   assert.equal(createRouteEdgeForConnection({ source: "ep-999", target: ep4.id }, nodes), null);
+});
+
+test("mergeNodePositions keeps dragged positions and drops stale node ids", () => {
+  const projected = projectTopologySnapshot({
+    endpoints: [
+      { id: 1, name: "HOST UART", port_type: "Uart", baud_rate: 115200, is_active: true },
+      { id: 2, name: "DUT VIRTUAL PAIR", port_type: "VirtualPair", baud_rate: 115200, is_active: true },
+    ],
+    routes: [],
+  }).nodes;
+  const previous = [
+    { ...projected[0], position: { x: 500, y: 600 } },
+    { ...projected[1], position: { x: 700, y: 620 } },
+    {
+      ...projected[1],
+      id: "ep-9",
+      position: { x: 900, y: 900 },
+    },
+  ];
+
+  const merged = mergeNodePositions(projected, previous);
+  assert.equal(merged.length, 2, "stale ep-9 is dropped");
+  assert.deepEqual(merged[0].position, { x: 500, y: 600 }, "dragged position kept");
+  assert.deepEqual(merged[1].position, { x: 700, y: 620 });
+  assert.equal(merged.some((node) => node.id === "ep-9"), false);
+
+  // New ids fall back to their projected slot instead of a dragged one.
+  const withNewcomer = mergeNodePositions(
+    [
+      ...projected,
+      {
+        ...projected[0],
+        id: "ep-3",
+        data: { ...projected[0].data, endpointId: 3 },
+        position: { x: 80, y: 80 },
+      },
+    ],
+    previous
+  );
+  assert.equal(withNewcomer.length, 3);
+  assert.notDeepEqual(withNewcomer[2].position, { x: 500, y: 600 });
+});
+
+test("uiFaultToWireConfig round-trips through wireFaultToUiConfig", () => {
+  const wire = uiFaultToWireConfig(ROUTE_FAULT_PRESET);
+  assert.deepEqual(
+    { secs: wire.fixed_delay.secs, nanos: wire.fixed_delay.nanos },
+    { secs: 0, nanos: 5_000_000 }
+  );
+  assert.equal(wire.bit_error_rate, 1e-4);
+  assert.equal(wire.gilbert_elliott?.p_gb, 0.01);
+  assert.equal(wire.corrupt_nth_crc, null);
+
+  const ui = wireFaultToUiConfig(wire);
+  assert.equal(ui.enabled, true);
+  assert.equal(ui.fixedDelayMs, 5);
+  assert.equal(ui.gaussianJitterMeanMs, 2);
+  assert.equal(ui.gaussianJitterStdDevMs, 1.5);
+  assert.equal(ui.bitErrorRate, 1e-4);
+  assert.equal(ui.burstErrorProb, 0.01);
+  assert.equal(ui.corruptNthCrc, 0);
+});
+
+test("demo canonical snapshot projects to the live 3-node / 2-route graph", () => {
+  const { nodes, edges } = projectTopologySnapshot(createDemoTopologySnapshot());
+  assert.equal(nodes.length, 3);
+  assert.deepEqual(
+    nodes.map((node) => node.data.label),
+    ["HOST UART", "DUT VIRTUAL PAIR", "WIRESHARK EXTCAP"]
+  );
+  // 1<->2 bidirectional expands to two directed edges, 1->3 to one.
+  assert.equal(edges.length, 3);
+  const faulty = edges.filter((edge) => edge.data.hasErrors);
+  assert.equal(faulty.length, 2, "both projections of the faulty bidirectional route");
+  assert.ok(faulty.every((edge) => edge.data.routeId === 100));
+  assert.ok(faulty.every((edge) => edge.data.faultConfig?.fixedDelayMs === 5));
+  assert.equal(edges.filter((edge) => edge.data.routeId === 101).length, 1);
 });
