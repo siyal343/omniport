@@ -33,7 +33,7 @@ fn create_capture_engine() -> std::io::Result<MmapCaptureEngine> {
 /// telemetry panels have content before `omniportd` is connected.
 ///
 /// NOTE: this is a temporary bridge until the desktop client consumes the
-/// daemon's live capture session; see docs/adr/ADR-001 (Daemon-First).
+/// daemon's live capture session; see docs/adr/0001-daemon-first-architecture.md.
 fn seed_demo_session(engine: &mut MmapCaptureEngine) {
     let base_time = 1_700_000_000_000_000_000u64;
     for i in 0..25 {

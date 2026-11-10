@@ -24,6 +24,11 @@ export interface TelemetryStripChartProps {
    * demo so it never claims live traffic while the toolbar shows DEMO STREAM.
    */
   hostDemoMode?: boolean;
+  /**
+   * True when the capture source is in an error/disconnected state. The strip
+   * has no frames to derive metrics from, so it must not claim live traffic.
+   */
+  offline?: boolean;
 }
 
 const WINDOW_SECONDS = 10;
@@ -40,6 +45,7 @@ export const TelemetryStripChart: React.FC<TelemetryStripChartProps> = ({
   rows = [],
   isDemo = false,
   hostDemoMode = false,
+  offline = false,
 }) => {
   const containerRef = useRef<HTMLDivElement>(null);
   const uplotRef = useRef<uPlot | null>(null);
@@ -281,19 +287,21 @@ export const TelemetryStripChart: React.FC<TelemetryStripChartProps> = ({
           <span
             data-testid="telemetry-source"
             style={{
-              color: isDemo || hostDemoMode ? "#d29922" : theme.rxText,
-              border: `1px solid ${isDemo || hostDemoMode ? "#d29922" : theme.rxText}`,
+              color: offline ? theme.errorText : isDemo || hostDemoMode ? "#d29922" : theme.rxText,
+              border: `1px solid ${offline ? theme.errorText : isDemo || hostDemoMode ? "#d29922" : theme.rxText}`,
               borderRadius: 3,
               padding: "0 4px",
               fontSize: 9,
               letterSpacing: "0.4px",
             }}
           >
-            {isDemo
-              ? "DEMO STREAM"
-              : hostDemoMode
-                ? "DEMO · VIEWPORT-DERIVED"
-                : "LIVE · VIEWPORT-DERIVED"}
+            {offline
+              ? "OFFLINE · NO CAPTURE"
+              : isDemo
+                ? "DEMO STREAM"
+                : hostDemoMode
+                  ? "DEMO · VIEWPORT-DERIVED"
+                  : "LIVE · VIEWPORT-DERIVED"}
           </span>
           <span style={{ color: theme.txText }}>● Rate: {activeRate} pkt/s</span>
           <span style={{ color: theme.rxText }}>● Throughput: {activeThroughput} KB/s</span>

@@ -287,6 +287,7 @@ export const SerialWorkbench: React.FC<SerialWorkbenchProps> = ({
                   rows={rows}
                   isDemo={state.sourceKind === "demo"}
                   hostDemoMode={hostDemoMode === true}
+                  offline={state.status === "error"}
                 />
               </div>
             </div>
@@ -322,6 +323,7 @@ export const SerialWorkbench: React.FC<SerialWorkbenchProps> = ({
               rows={rows}
               isDemo={state.sourceKind === "demo"}
               hostDemoMode={hostDemoMode === true}
+              offline={state.status === "error"}
             />
           </div>
         )}
