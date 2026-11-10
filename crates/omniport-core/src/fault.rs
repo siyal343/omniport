@@ -159,13 +159,18 @@ impl FaultInjector {
         // 1. Calculate timing delay: Fixed + Box-Muller Jitter + Serialization Rate Limit
         let mut delay = self.config.fixed_delay;
 
-        if self.config.jitter_std_dev > Duration::ZERO {
-            let z = self.rng.next_gaussian();
+        // A non-zero mean latency is a valid deterministic delay on its own, so the
+        // Gaussian branch must also run when `jitter_std_dev` is zero.
+        if self.config.jitter_mean > Duration::ZERO || self.config.jitter_std_dev > Duration::ZERO {
             let mean_ns = self.config.jitter_mean.as_nanos() as f64;
-            let std_ns = self.config.jitter_std_dev.as_nanos() as f64;
-            let jitter_ns = mean_ns + z * std_ns;
+            let jitter_ns = if self.config.jitter_std_dev > Duration::ZERO {
+                let std_ns = self.config.jitter_std_dev.as_nanos() as f64;
+                mean_ns + self.rng.next_gaussian() * std_ns
+            } else {
+                mean_ns
+            };
             if jitter_ns > 0.0 {
-                delay += Duration::from_nanos(jitter_ns as u64);
+                delay = delay.saturating_add(Duration::from_nanos(jitter_ns as u64));
             }
         }
 
@@ -178,7 +183,7 @@ impl FaultInjector {
                 let scheduled_start = self.next_avail_ns.max(now_ns);
                 let rate_delay_ns = scheduled_start.saturating_sub(now_ns);
                 self.next_avail_ns = scheduled_start.saturating_add(ser_ns);
-                delay += Duration::from_nanos(rate_delay_ns);
+                delay = delay.saturating_add(Duration::from_nanos(rate_delay_ns));
             }
         }
 
@@ -365,6 +370,41 @@ mod tests {
             "Sample std {} out of tolerance",
             sample_std
         );
+    }
+
+    #[test]
+    fn test_jitter_mean_applied_with_zero_std_dev() {
+        // A configured mean latency with zero standard deviation is a deterministic
+        // delay; it must not be silently dropped (CLI scenarios set mean_latency_ms
+        // independently of jitter_stddev_ms).
+        let mean = Duration::from_millis(5);
+        let mut injector = FaultInjector::with_seed(
+            FaultConfig {
+                jitter_mean: mean,
+                jitter_std_dev: Duration::ZERO,
+                ..Default::default()
+            },
+            7,
+        );
+        let out = injector.inject(make_test_event(b"x"), 1_000_000).unwrap();
+        assert_eq!(out.delay, mean);
+    }
+
+    #[test]
+    fn test_delay_saturates_instead_of_overflowing() {
+        // Fixed delay plus jitter is bounded by Duration::MAX; adding must saturate
+        // rather than panic with a Duration overflow.
+        let mut injector = FaultInjector::with_seed(
+            FaultConfig {
+                fixed_delay: Duration::MAX,
+                jitter_mean: Duration::from_millis(1),
+                jitter_std_dev: Duration::ZERO,
+                ..Default::default()
+            },
+            3,
+        );
+        let out = injector.inject(make_test_event(b"x"), 1_000_000).unwrap();
+        assert_eq!(out.delay, Duration::MAX);
     }
 
     #[test]

@@ -1,5 +1,4 @@
 use crate::crc::CrcAlgorithm;
-use crate::{EndpointId, FrameFlags, PinState, SerialEvent};
 use bytes::{Buf, Bytes, BytesMut};
 use std::time::Duration;
 
@@ -34,6 +33,12 @@ pub struct StreamPacketizer {
 
 impl StreamPacketizer {
     pub fn new(rule: FramingRule) -> Self {
+        // An empty delimiter can never match a position and would make
+        // `slice::windows(0)` panic, so treat it as unframed pass-through data.
+        let rule = match rule {
+            FramingRule::Delimiter(ref delim) if delim.is_empty() => FramingRule::Raw,
+            other => other,
+        };
         Self {
             rule,
             crc: None,
@@ -138,46 +143,6 @@ impl StreamPacketizer {
         }
     }
 
-    /// Processes incoming chunks and outputs `SerialEvent` items with `FrameFlags::ERR_CRC` flagged if CRC check fails.
-    pub fn push_chunk_events(
-        &mut self,
-        chunk: &[u8],
-        now_ns: u64,
-        source_id: EndpointId,
-        out: &mut Vec<SerialEvent>,
-    ) {
-        let mut raw_frames = Vec::new();
-        // Temporarily disable CRC filtering to capture corrupted frames as events
-        let saved_crc = self.crc.take();
-        self.push_chunk(chunk, now_ns, &mut raw_frames);
-        self.crc = saved_crc;
-
-        for frame in raw_frames {
-            let mut flags = FrameFlags::empty();
-            let payload = if let Some(crc) = &self.crc {
-                if !crc.validate(&frame) {
-                    flags |= FrameFlags::ERR_CRC;
-                    frame
-                } else if self.strip_crc {
-                    let payload_len = frame.len() - crc.checksum_len();
-                    frame.slice(0..payload_len)
-                } else {
-                    frame
-                }
-            } else {
-                frame
-            };
-
-            out.push(SerialEvent {
-                timestamp_ns: now_ns,
-                source_id,
-                flags,
-                pins: PinState::empty(),
-                payload,
-            });
-        }
-    }
-
     fn extract_frames(&mut self, out: &mut Vec<Bytes>) {
         match &self.rule {
             FramingRule::Delimiter(delim) => {
@@ -225,7 +190,7 @@ impl StreamPacketizer {
                         break;
                     }
                 }
-                let min_hdr = len_offset + (*len_bytes as usize);
+                let min_hdr = len_offset.saturating_add((*len_bytes as usize).max(1));
                 if self.rx_buf.len() < min_hdr {
                     break;
                 }
@@ -253,7 +218,10 @@ impl StreamPacketizer {
                     ]) as usize,
                     _ => 0,
                 };
-                let total_frame_len = payload_len + *header_overhead;
+                // A frame must at least contain the header bytes that describe its length;
+                // clamping to `min_hdr` also guarantees forward progress for degenerate rules
+                // whose computed frame length would otherwise be zero (infinite loop).
+                let total_frame_len = payload_len.saturating_add(*header_overhead).max(min_hdr);
                 if self.rx_buf.len() < total_frame_len {
                     break;
                 }
@@ -270,7 +238,8 @@ impl StreamPacketizer {
         let mut idx = 0;
         while idx < input.len() {
             let code = input[idx] as usize;
-            if code == 0 || idx + code > input.len() + 1 {
+            // `code` counts the code byte itself: `code - 1` data bytes must remain.
+            if code == 0 || idx + code > input.len() {
                 return None;
             }
             idx += 1;
@@ -390,6 +359,56 @@ mod tests {
     }
 
     #[test]
+    fn test_cobs_roundtrip_across_full_block_boundaries() {
+        // Payloads longer than the 0xFE-byte COBS block limit exercise the code == 0xFF path.
+        for len in [0usize, 1, 253, 254, 255, 256, 508, 509] {
+            let payload: Vec<u8> = (0..len).map(|i| (i % 255) as u8 + 1).collect();
+            let encoded = StreamPacketizer::encode_cobs(&payload);
+            let mut p = StreamPacketizer::new(FramingRule::Cobs);
+            let mut out = Vec::new();
+            for chunk in encoded.chunks(17) {
+                p.push_chunk(chunk, 100, &mut out);
+            }
+            assert_eq!(out.len(), 1, "len {} produced no frame", len);
+            assert_eq!(&out[0][..], &payload[..], "len {} roundtrip mismatch", len);
+        }
+    }
+
+    #[test]
+    fn test_decode_cobs_rejects_truncated_encoded_block() {
+        // 0x02 announces one data byte, but the encoded input is empty: this is a
+        // malformed COBS frame and must be rejected instead of panicking on a slice.
+        assert_eq!(StreamPacketizer::decode_cobs(&[0x02]), None);
+        assert_eq!(StreamPacketizer::decode_cobs(&[0x03, 0x41]), None);
+        assert_eq!(StreamPacketizer::decode_cobs(&[0x00]), None);
+    }
+
+    #[test]
+    fn test_cobs_packetizer_drops_truncated_frame_without_panic() {
+        let mut p = StreamPacketizer::new(FramingRule::Cobs);
+        let mut out = Vec::new();
+        // A malformed frame `[0x02, 0x00]` (delimiter after a truncated block) must be
+        // dropped safely instead of triggering an out-of-bounds slice.
+        p.push_chunk(&[0x02, 0x00], 100, &mut out);
+        assert!(out.is_empty());
+        // A subsequent well-formed frame is still recovered.
+        p.push_chunk(&StreamPacketizer::encode_cobs(b"ok"), 200, &mut out);
+        assert_eq!(out.len(), 1);
+        assert_eq!(&out[0][..], b"ok");
+    }
+
+    #[test]
+    fn test_empty_delimiter_does_not_panic() {
+        // An empty delimiter cannot frame anything; treat it as raw pass-through
+        // instead of calling windows(0), which panics with "window size must be non-zero".
+        let mut p = StreamPacketizer::new(FramingRule::Delimiter(Vec::new()));
+        let mut out = Vec::new();
+        p.push_chunk(b"abc", 100, &mut out);
+        assert_eq!(out.len(), 1);
+        assert_eq!(&out[0][..], b"abc");
+    }
+
+    #[test]
     fn test_slip_framing_and_escaping() {
         let payload = vec![0x01, SLIP_END, 0x02, SLIP_ESC, 0x03];
         let encoded = StreamPacketizer::encode_slip(&payload);
@@ -416,6 +435,40 @@ mod tests {
         );
         assert_eq!(out.len(), 1);
         assert_eq!(&out[0][..], &[0x10, 0x20]);
+    }
+
+    #[test]
+    fn test_length_field_offset_overflow_does_not_panic() {
+        // A pathological len_offset must not overflow when the parser computes the minimum
+        // header size; it should simply wait for (impossible) more data.
+        let mut p = StreamPacketizer::new(FramingRule::LengthField {
+            sync_word: Vec::new(),
+            len_offset: usize::MAX,
+            len_bytes: 2,
+            little_endian: true,
+            header_overhead: 4,
+        });
+        let mut out = Vec::new();
+        p.push_chunk(b"\x00\x00\x00\x00", 100, &mut out);
+        assert!(out.is_empty());
+    }
+
+    #[test]
+    fn test_degenerate_length_field_rule_terminates() {
+        // header_overhead == 0 with a zero length value used to produce
+        // total_frame_len == 0, emitting empty frames forever without consuming input.
+        // The decoder must always make at least the header size of progress.
+        let mut p = StreamPacketizer::new(FramingRule::LengthField {
+            sync_word: Vec::new(),
+            len_offset: 0,
+            len_bytes: 1,
+            little_endian: true,
+            header_overhead: 0,
+        });
+        let mut out = Vec::new();
+        p.push_chunk(&[0x00, 0x00], 100, &mut out);
+        assert_eq!(out.len(), 2);
+        assert!(out.iter().all(|frame| frame.len() == 1));
     }
 
     #[test]
@@ -490,27 +543,5 @@ mod tests {
         );
         assert_eq!(out_strip.len(), 1);
         assert_eq!(&out_strip[0][..], payload);
-    }
-
-    #[test]
-    fn test_push_chunk_events_flags_err_crc() {
-        let crc = CrcAlgorithm::crc32();
-        let payload = b"TELEMETRY_PACKET";
-        let valid = crc.append_checksum(payload);
-
-        let mut corrupted = valid.clone();
-        corrupted[0] ^= 0x01; // flip bit
-
-        let mut p = StreamPacketizer::new(FramingRule::Slip).with_crc(crc);
-        let mut events = Vec::new();
-
-        let mut stream = Vec::new();
-        stream.extend_from_slice(&StreamPacketizer::encode_slip(&valid));
-        stream.extend_from_slice(&StreamPacketizer::encode_slip(&corrupted));
-
-        p.push_chunk_events(&stream, 500, 42, &mut events);
-        assert_eq!(events.len(), 2);
-        assert_eq!(events[0].flags, FrameFlags::empty());
-        assert!(events[1].flags.contains(FrameFlags::ERR_CRC));
     }
 }

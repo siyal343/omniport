@@ -12,6 +12,22 @@ pub fn calculate_byte_rate(cfg: &SerialConfig) -> f64 {
     cfg.baud_rate as f64 / bits_per_byte
 }
 
+/// Smallest rate the token bucket will model, in bytes per second.
+///
+/// A serial config may carry `baud_rate == 0` (uninitialised or rejected
+/// elsewhere). Treating that as "0 bytes/s forever" would make `throttle()`
+/// return a multi-century delay (f64 infinity saturating on the integer cast),
+/// so the bucket floors the rate at one byte per second instead.
+const MIN_RATE_BYTES_PER_SEC: f64 = 1.0;
+
+fn sanitize_rate(rate: f64) -> f64 {
+    if rate.is_finite() && rate > 0.0 {
+        rate
+    } else {
+        MIN_RATE_BYTES_PER_SEC
+    }
+}
+
 /// Token-Bucket software baud rate throttler for virtual serial ports
 #[derive(Debug, Clone)]
 pub struct TokenBucketThrottler {
@@ -25,7 +41,7 @@ pub struct TokenBucketThrottler {
 
 impl TokenBucketThrottler {
     pub fn new(config: SerialConfig) -> Self {
-        let rate = calculate_byte_rate(&config);
+        let rate = sanitize_rate(calculate_byte_rate(&config));
         // Default bucket capacity: 50 ms worth of tokens (min 64 bytes)
         let capacity = (rate * 0.05).max(64.0);
         Self {
@@ -52,7 +68,7 @@ impl TokenBucketThrottler {
 
     pub fn update_config(&mut self, new_config: SerialConfig) {
         self.config = new_config;
-        self.rate_bytes_per_sec = calculate_byte_rate(&new_config);
+        self.rate_bytes_per_sec = sanitize_rate(calculate_byte_rate(&new_config));
         self.capacity = (self.rate_bytes_per_sec * 0.05).max(64.0);
         self.tokens = self.tokens.min(self.capacity);
     }
@@ -141,6 +157,25 @@ mod tests {
         };
         let expected = 9600.0 / 9.0;
         assert!((calculate_byte_rate(&cfg_9600_7n1) - expected).abs() < 1e-6);
+    }
+
+    #[test]
+    fn test_zero_baud_rate_yields_finite_delay_instead_of_centuries() {
+        // baud_rate == 0 is an invalid/uninitialised config. The raw division by the
+        // derived 0 B/s rate made the delay f64 infinity, which saturated to a
+        // ~584-year Duration on the integer cast. The bucket now floors the rate.
+        let mut throttler = TokenBucketThrottler::new(SerialConfig {
+            baud_rate: 0,
+            data_bits: 8,
+            stop_bits: 1,
+            parity: 0,
+        });
+        assert!(throttler.byte_rate() >= 1.0);
+        let delay = throttler.throttle(100, 1_000_000_000);
+        assert!(
+            delay < Duration::from_secs(3_600),
+            "zero-baud throttle delay was {delay:?}"
+        );
     }
 
     #[test]

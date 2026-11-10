@@ -76,6 +76,11 @@ impl BoundedEventQueue {
     /// Asynchronously awaits and dequeues the next event
     pub async fn recv(&self, endpoint_id: EndpointId) -> Result<SerialEvent, RoutingError> {
         loop {
+            // Create the notification future *before* inspecting shared state. `Notified`
+            // records the `notify_waiters` epoch at creation, so a concurrent `close()`
+            // landing between the check below and the await can no longer be lost (which
+            // would leave this receiver blocked forever on a closed queue).
+            let notified = self.notify.notified();
             {
                 let mut q = self.queue.lock().unwrap_or_else(|e| e.into_inner());
                 if let Some(event) = q.pop_front() {
@@ -85,7 +90,7 @@ impl BoundedEventQueue {
                     return Err(RoutingError::ChannelClosed(endpoint_id));
                 }
             }
-            self.notify.notified().await;
+            notified.await;
         }
     }
 
@@ -280,12 +285,24 @@ impl RoutingGraph {
                             dispatched += 1;
                         }
                     } else {
-                        // Non-blocking asynchronous delay delivery
-                        tokio::spawn(async move {
-                            tokio::time::sleep(delay).await;
-                            let _ = queue.push(out_event);
-                        });
-                        dispatched += 1;
+                        // Non-blocking asynchronous delay delivery. `route` may also be
+                        // called from synchronous code (tests, CLI scenario setup) where
+                        // no Tokio runtime exists; spawning there would panic, so fall
+                        // back to immediate delivery and document the lost delay.
+                        match tokio::runtime::Handle::try_current() {
+                            Ok(handle) => {
+                                handle.spawn(async move {
+                                    tokio::time::sleep(delay).await;
+                                    let _ = queue.push(out_event);
+                                });
+                                dispatched += 1;
+                            }
+                            Err(_) => {
+                                if queue.push(out_event).unwrap_or(false) {
+                                    dispatched += 1;
+                                }
+                            }
+                        }
                     }
                 }
             } else if dest_queue.push(event.clone()).unwrap_or(false) {
@@ -450,6 +467,86 @@ mod tests {
                 s
             );
         }
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn test_burst_push_wakes_all_waiting_consumers() {
+        // Two consumers are already waiting when a burst of two events is pushed; both
+        // must be woken and every queued event must reach exactly one consumer.
+        let q = Arc::new(BoundedEventQueue::new(10, BackpressurePolicy::DropNewest));
+        let mut handles = Vec::new();
+        for _ in 0..2 {
+            let queue = Arc::clone(&q);
+            handles.push(tokio::spawn(async move {
+                tokio::time::timeout(Duration::from_secs(5), queue.recv(1)).await
+            }));
+        }
+
+        // Let both consumer tasks poll `recv` and register as waiters before pushing.
+        tokio::task::yield_now().await;
+        tokio::task::yield_now().await;
+
+        q.push(make_event(1, b"first")).unwrap();
+        q.push(make_event(1, b"second")).unwrap();
+
+        let mut payloads = Vec::new();
+        for handle in handles {
+            let timed = handle.await.unwrap();
+            let event = timed
+                .expect("a waiting consumer was never woken")
+                .expect("recv failed unexpectedly");
+            payloads.push(event.payload.to_vec());
+        }
+        payloads.sort();
+        assert_eq!(payloads, vec![b"first".to_vec(), b"second".to_vec()]);
+        assert!(q.is_empty());
+    }
+
+    #[tokio::test]
+    async fn test_close_wakes_waiting_receiver_with_channel_closed() {
+        let q = Arc::new(BoundedEventQueue::new(1, BackpressurePolicy::DropNewest));
+        let receiver_queue = Arc::clone(&q);
+        let handle = tokio::spawn(async move { receiver_queue.recv(7).await });
+        tokio::task::yield_now().await;
+
+        q.close();
+        let result = tokio::time::timeout(Duration::from_secs(5), handle)
+            .await
+            .expect("waiting receiver was not woken by close()")
+            .unwrap();
+        assert!(
+            matches!(result, Err(RoutingError::ChannelClosed(7))),
+            "expected ChannelClosed, got {result:?}"
+        );
+    }
+
+    #[test]
+    fn test_delayed_route_outside_async_runtime_does_not_panic() {
+        // `route` used to call `tokio::spawn` unconditionally for delayed edges, which
+        // panics when the caller is not inside a Tokio runtime (sync CLI setup/tests).
+        let graph = RoutingGraph::new();
+        graph
+            .register_endpoint(1, 10, BackpressurePolicy::DropNewest)
+            .unwrap();
+        graph
+            .register_endpoint(2, 10, BackpressurePolicy::DropNewest)
+            .unwrap();
+        graph
+            .add_edge(
+                1,
+                2,
+                Some(FaultConfig {
+                    fixed_delay: Duration::from_millis(5),
+                    ..FaultConfig::default()
+                }),
+            )
+            .unwrap();
+
+        let dispatched = graph.route(make_event(1, b"delayed")).unwrap();
+        assert_eq!(dispatched, 1);
+        // Without a runtime the frame is delivered immediately rather than spawned.
+        let received = graph.try_recv(2).unwrap().expect("frame delivered");
+        assert_eq!(&received.payload[..], b"delayed");
     }
 
     #[test]
