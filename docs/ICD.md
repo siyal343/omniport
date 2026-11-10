@@ -61,7 +61,10 @@ one schema owner).
 - **Transport:** TCP stream (`127.0.0.1:50051` by default, configurable via `omniportd --bind`).
 - **Frame layout:** `[len: u32 big-endian][payload: UTF-8 JSON]`.
 - **Frame limit:** `MAX_FRAME_SIZE = 16 MiB` (`16 * 1024 * 1024` bytes), checked before
-  allocating the read buffer and before writing (`ProtoError::FrameTooLarge`).
+  allocating the read buffer and before writing (`ProtoError::FrameTooLarge`). A frame
+  over the limit closes the connection.
+- **Connection policy:** see §3.4 (loopback default, remote-bind opt-in, timeouts,
+  connection cap and rate limit).
 
 ### 3.2 Canonical Messages (`Request` / `Response`)
 Requests and responses serialize with serde's externally-tagged enum JSON representation
@@ -95,5 +98,25 @@ Requests and responses serialize with serde's externally-tagged enum JSON repres
   - `404` — unknown endpoint ID or route ID.
   - `409` — endpoint ID conflict or conflicting non-equal `FaultConfig` on the same directed edge.
   - `413` — ICD §2 viewport batch exceeds `MAX_VIEWPORT_BATCH_BYTES`.
-  - `503` — endpoint/pair/route ID space exhausted or `omniportd` is shutting down.
+  - `429` — per-connection request rate limit exceeded (`--max-requests-per-sec`); connection is then closed.
+  - `503` — endpoint/pair/route ID space exhausted, `omniportd` is shutting down, the request exceeded `--request-timeout-secs`, or a new connection was rejected by `--max-connections`.
   - `500` — internal routing invariant failure.
+
+### 3.4 Connection Policy, Limits, and Bind Security
+
+The control plane has **no authentication**: TCP loopback relies on the OS user
+boundary, and there are no per-connection peer-credential checks yet. The server
+therefore applies a bounded, opt-in policy (`crates/omniportd/src/server.rs`,
+CLI in `crates/omniportd/src/main.rs`):
+
+| Setting | Default | Behaviour |
+| :--- | :--- | :--- |
+| bind address | `127.0.0.1:50051` | Loopback only. Any non-loopback `--bind` is refused at startup unless `--allow-remote` is passed; remote control should only be enabled behind an authenticated tunnel/network. |
+| `--max-connections` | `64` | Concurrency is bounded by a semaphore. Over-limit connections are read for at most `min(request_timeout, 2 s)` and answered with `Error { code: 503, "connection limit reached" }` before closing; connections that send nothing are dropped silently. |
+| `--idle-timeout-secs` | `30` | A connected client that sends no request is closed **silently** after the deadline. The transport is strictly request/response, so no unsolicited `408` frame is emitted (it would be mis-read as the response to the next request); clients reconnect on their next call. |
+| `--request-timeout-secs` | `10` | If handling one request exceeds the deadline, the client receives `Error { code: 503, "request timed out" }`. |
+| `--max-requests-per-sec` | `200` per connection | Sliding one-second window; exceeding it returns `Error { code: 429 }` and closes the connection. `0` disables the limit. |
+
+Idle connections, oversized frames, and overload rejections are logged to stderr.
+The desktop client adapters (`DaemonCaptureStore`, `DaemonTopology`) transparently
+reconnect after an idle/daemon-restart close.
