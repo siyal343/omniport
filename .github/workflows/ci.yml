@@ -3,6 +3,7 @@ name: CI
 on:
   push:
   pull_request:
+  workflow_dispatch:
 
 permissions:
   contents: read
@@ -38,6 +39,29 @@ jobs:
       # Includes the ICD §2 golden-fixture contract test
       # (crates/omniport-capture/tests/viewport_contract.rs).
       - name: Workspace tests
+        run: cargo test --workspace --locked
+
+  # The Windows job cannot compile `#[cfg(unix)]` / `#[cfg(target_os = "linux")]`
+  # code (POSIX PTY, termios, CUSE FUSE backend), so it never type-checks the
+  # unix-only backends. This job covers that half of the platform matrix.
+  rust-linux:
+    name: Rust workspace (ubuntu, unix backends)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          components: rustfmt, clippy
+
+      - name: Cache cargo
+        uses: Swatinem/rust-cache@v2
+
+      - name: Clippy (deny warnings, unix cfg coverage)
+        run: cargo clippy --workspace --all-targets --locked -- -D warnings
+
+      - name: Workspace tests (unix backends)
         run: cargo test --workspace --locked
 
   desktop:
