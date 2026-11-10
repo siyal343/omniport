@@ -5,6 +5,8 @@ Everything a contributor (human or agent) needs to know *what* OmniPort must do 
 
 ## Start here
 
+- **[Repository README](../README.md)** — public project overview, architecture, quick
+  start and repository layout.
 - **[PROGRESS.md](PROGRESS.md)** — the single implementation tracker: phases, steps,
   verification protocol. Check this before starting work; use the `/step-runner`
   skill to execute one step at a time.
@@ -40,6 +42,9 @@ decision with a frozen cross-language fixture; the rule of thumb is that every
 ## Conventions for this directory
 
 - Keep `PROGRESS.md` as the only tracker; do not add a second progress file.
+- Verification lives in `PROGRESS.md`, `AUDIT_2026-11-10.md` and `VV_RTM.md`. The
+  historical per-crate `REPORT_STEP_*.md` files were removed in Step 7.8; do not
+  reintroduce per-step reports.
 - The test suite is the executable part of these specs: `cargo test --workspace`,
   the desktop `npm test` (including the ICD §2 golden-fixture contract), and the
   Tauri host tests.

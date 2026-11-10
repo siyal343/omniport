@@ -10,7 +10,7 @@
 - **FR-203 (Atomic Merging):** Serialize complete framed packets atomically during $N:1$ merges to prevent byte interleaving.
 - **FR-301 (Timing Faults):** Inject fixed delay, Box-Muller Gaussian jitter, bandwidth limits, and disconnects on any routing edge.
 - **FR-302 (Corruption Faults):** Inject uniform random bit flips, Gilbert-Elliott burst errors, and targeted Nth-frame CRC corruption.
-- **FR-401 (Dual-Mmap Capture):** Record events into `session.idx` (24-byte stride) and `session.dat` with $O(1)$ viewport seeking.
+- **FR-401 (Dual-Mmap Capture):** Record events into `session.idx` (24-byte stride) and `session.dat` with $O(1)$ viewport seeking. **Session scope:** capture sessions are ephemeral per daemon process — a daemon restart starts a new session and discards the previous one; durable history is via PCAPNG/extcap export. See [ADR-0010](adr/0010-ephemeral-capture-sessions.md).
 - **FR-402 (C-Struct Dissector):** Parse packed C struct definitions at runtime and extract scaled engineering values.
 - **FR-403 (Lua Simulator):** Execute sandboxed Lua 5.4 device scripts with instruction fuel limits.
 - **FR-404 (Wireshark Extcap):** Stream live framed packets to Wireshark via PCAPNG named pipes.

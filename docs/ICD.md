@@ -36,6 +36,17 @@
 | 6 | `0x40` | `PIN_CHANGE` |
 | 7 | `0x80` | reserved (must be 0) |
 
+### 1.3 Session lifetime (ephemeral, ADR-0010)
+
+`MmapCaptureEngine::create` truncates `session.idx` / `session.dat` at daemon start:
+capture sessions are **ephemeral per daemon process**. A restart begins a new,
+zero-length session (the GUI reports `Total: 0 frames`); previous file content is never
+resumed, validated, or re-read. Durable history is provided by PCAPNG export
+(`omniport-capture` / `omniport-cli`) and Wireshark extcap streaming. Persistence,
+rotation, and crash recovery are out of scope for v0.1 — a future implementation must
+add a versioned session header and supersede
+[ADR-0010](adr/0010-ephemeral-capture-sessions.md).
+
 ## 2. Tauri Binary Viewport Wire Format (`fetch_viewport_rows`)
 - Header (16 bytes): `[total_packets: u64 (8B)][returned_rows: u32 (4B)][reserved: u32 (4B)]`
 - Repeated `returned_rows` times: `[FrameIndexEntry (24B)][payload_bytes (N bytes)]`

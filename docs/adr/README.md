@@ -14,6 +14,7 @@ accepted: add a new ADR that supersedes an old one rather than editing history.
 | [0007](0007-single-owner-viewport-wire-contract.md) | Single-owner viewport wire contract | Accepted |
 | [0008](0008-json-tcp-daemon-control-plane.md) | Length-prefixed JSON over TCP control plane | Accepted |
 | [0009](0009-scoped-zero-copy-pipeline.md) | Scoped zero-copy pipeline | Accepted |
+| [0010](0010-ephemeral-capture-sessions.md) | Ephemeral capture sessions (no persistence across daemon restarts) | Accepted |
 
 The two decisions flagged by the 2026-11-10 audit — ADR-0001 (transport and
 daemon-client status) and ADR-0003 (zero-copy scope) — are resolved by
