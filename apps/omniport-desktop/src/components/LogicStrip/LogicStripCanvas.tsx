@@ -50,17 +50,25 @@ export const LogicStripCanvas: React.FC<LogicStripCanvasProps> = ({
     const container = containerRef.current;
     if (!container) return;
 
+    let raf = 0;
     const observer = new ResizeObserver((entries) => {
-      for (const entry of entries) {
-        const w = entry.contentRect.width;
-        if (w > 0) {
-          setWidth(Math.floor(w));
-        }
-      }
+      const entry = entries[0];
+      if (!entry) return;
+      const measured = Math.floor(entry.contentRect.width);
+      if (measured <= 0) return;
+      // Defer the state update out of the observer delivery to avoid layout
+      // feedback loops ("ResizeObserver loop completed...").
+      cancelAnimationFrame(raf);
+      raf = requestAnimationFrame(() => {
+        setWidth((prev) => (prev === measured ? prev : measured));
+      });
     });
 
     observer.observe(container);
-    return () => observer.disconnect();
+    return () => {
+      observer.disconnect();
+      cancelAnimationFrame(raf);
+    };
   }, []);
 
   useEffect(() => {
@@ -69,10 +77,12 @@ export const LogicStripCanvas: React.FC<LogicStripCanvasProps> = ({
     const ctx = canvas.getContext("2d", { alpha: false });
     if (!ctx) return;
 
-    let animFrameId: number;
+    let animFrameId = 0;
     const dpr = window.devicePixelRatio || 1;
+    let lastRows: ViewportRowData[] | null = null;
+    let lastKey = "";
 
-    const render = () => {
+    const paint = () => {
       const p = propsRef.current;
       const targetW = Math.round(p.width * dpr);
       const targetH = Math.round(p.height * dpr);
@@ -83,6 +93,11 @@ export const LogicStripCanvas: React.FC<LogicStripCanvasProps> = ({
         canvas.style.width = `${p.width}px`;
         canvas.style.height = `${p.height}px`;
       }
+
+      const key = [p.width, p.height, p.startRowIndex, p.visibleRowCount, p.selectedRowIndex, p.theme.background].join("|");
+      if (p.rows === lastRows && key === lastKey) return;
+      lastRows = p.rows;
+      lastKey = key;
 
       ctx.save();
       ctx.scale(dpr, dpr);
@@ -99,9 +114,12 @@ export const LogicStripCanvas: React.FC<LogicStripCanvasProps> = ({
       });
 
       ctx.restore();
-      animFrameId = requestAnimationFrame(render);
     };
 
+    const render = () => {
+      paint();
+      animFrameId = requestAnimationFrame(render);
+    };
     animFrameId = requestAnimationFrame(render);
     return () => cancelAnimationFrame(animFrameId);
   }, []);
@@ -126,6 +144,7 @@ export const LogicStripCanvas: React.FC<LogicStripCanvasProps> = ({
   return (
     <div
       ref={containerRef}
+      data-testid="logic-strip"
       style={{
         width: "100%",
         height: `${height}px`,
@@ -137,6 +156,7 @@ export const LogicStripCanvas: React.FC<LogicStripCanvasProps> = ({
       <canvas
         ref={canvasRef}
         onClick={handleClick}
+        aria-label="Synchronized modem control pin logic waveforms"
         style={{ display: "block", cursor: "crosshair" }}
       />
     </div>

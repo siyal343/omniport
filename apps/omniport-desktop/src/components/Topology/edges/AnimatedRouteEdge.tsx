@@ -51,13 +51,13 @@ export const AnimatedRouteEdge: React.FC<EdgeProps<OmniPortEdge>> = ({
               position: "absolute",
               transform: `translate(-50%, -50%) translate(${labelX}px,${labelY}px)`,
               pointerEvents: "all",
-              backgroundColor: "#161b22",
-              border: `1px solid ${hasErrors ? "#f85149" : "#30363d"}`,
+              backgroundColor: "var(--tp-node-bg, #161b22)",
+              border: `1px solid ${hasErrors ? "#f85149" : "var(--tp-border, #30363d)"}`,
               borderRadius: 4,
               padding: "2px 6px",
               fontSize: 10,
               fontFamily: 'SFMono-Regular, Consolas, "Liberation Mono", Menlo, monospace',
-              color: hasErrors ? "#f85149" : "#8b949e",
+              color: hasErrors ? "#f85149" : "var(--tp-muted, #8b949e)",
               boxShadow: "0 2px 6px rgba(0,0,0,0.4)",
             }}
           >

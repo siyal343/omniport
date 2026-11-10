@@ -1,6 +1,7 @@
 import React, { Component, type ErrorInfo, type ReactNode } from "react";
 import ReactDOM from "react-dom/client";
 import { App } from "./App.tsx";
+import "./styles/global.css";
 
 interface ErrorBoundaryProps {
   children: ReactNode;

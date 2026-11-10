@@ -1,0 +1,428 @@
+/*
+ * OmniPort desktop UI tokens + interaction polish.
+ * Dark industrial instrument-panel identity; no heavy motion on
+ * high-frequency surfaces (monitor canvas, logic strip, telemetry chart).
+ */
+
+:root {
+  /* Custom easing curves — built-in CSS easings are too weak for UI. */
+  --ease-out: cubic-bezier(0.23, 1, 0.32, 1);
+  --ease-in-out: cubic-bezier(0.77, 0, 0.175, 1);
+  --ease-drawer: cubic-bezier(0.32, 0.72, 0, 1);
+
+  --dur-press: 120ms;
+  --dur-hover: 150ms;
+
+  --font-ui: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Helvetica, Arial,
+    sans-serif;
+  --font-mono: "JetBrains Mono", "SF Mono", "Cascadia Code", Consolas, "Liberation Mono",
+    Menlo, monospace;
+
+  --focus-ring: #58a6ff;
+  --surface-app: #0d1117;
+  --surface-panel: #161b22;
+  --border-subtle: #30363d;
+}
+
+* {
+  box-sizing: border-box;
+}
+
+html,
+body,
+#root {
+  width: 100%;
+  height: 100%;
+  margin: 0;
+  padding: 0;
+  overflow: hidden;
+  background: var(--surface-app);
+}
+
+body {
+  color-scheme: dark;
+  font-family: var(--font-ui);
+  -webkit-font-smoothing: antialiased;
+  text-rendering: optimizeLegibility;
+}
+
+::selection {
+  background: rgba(88, 166, 255, 0.35);
+}
+
+.op-workbench {
+  font-family: var(--font-ui);
+}
+
+/* ------------------------------------------------------------------ */
+/* Toolbar                                                             */
+/* ------------------------------------------------------------------ */
+
+.op-toolbar {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  flex-wrap: wrap;
+  gap: 4px 16px;
+  padding: 6px 12px;
+  font-size: 12px;
+  line-height: 18px;
+}
+
+.op-toolbar-left,
+.op-actions {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 4px 12px;
+  min-width: 0;
+}
+
+.op-toolbar-left {
+  gap: 4px 16px;
+}
+
+.op-brand {
+  font-weight: 700;
+  letter-spacing: 0.5px;
+  font-size: 12px;
+  white-space: nowrap;
+}
+
+.op-demo-badge {
+  font-size: 9px;
+  font-weight: 600;
+  letter-spacing: 0.6px;
+  color: #d29922;
+  border: 1px solid #d29922;
+  border-radius: 3px;
+  padding: 0 4px;
+  line-height: 14px;
+  white-space: nowrap;
+  font-variant-numeric: tabular-nums;
+}
+
+.op-metric {
+  font-variant-numeric: tabular-nums;
+  white-space: nowrap;
+}
+
+.op-selection {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 8px;
+  font-size: 11px;
+  font-variant-numeric: tabular-nums;
+}
+
+/* ------------------------------------------------------------------ */
+/* Capture transport banner (only rendered when status === "error")     */
+/* ------------------------------------------------------------------ */
+
+.op-banner {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 4px 12px;
+  padding: 6px 12px;
+  font-size: 11px;
+  font-family: var(--font-mono);
+  font-variant-numeric: tabular-nums;
+  flex-shrink: 0;
+}
+
+.op-banner-error {
+  color: #ffb3ae;
+  background: rgba(248, 81, 73, 0.14);
+  border-bottom: 1px solid rgba(248, 81, 73, 0.45);
+}
+
+.op-banner-title {
+  font-weight: 700;
+  letter-spacing: 0.6px;
+  color: #f85149;
+}
+
+.op-banner-message {
+  color: inherit;
+  opacity: 0.9;
+  overflow-wrap: anywhere;
+}
+
+.op-banner .op-btn {
+  border: 1px solid rgba(248, 81, 73, 0.5);
+  background: transparent;
+  color: #f85149;
+}
+
+/* ------------------------------------------------------------------ */
+/* Tabs                                                                */
+/* ------------------------------------------------------------------ */
+
+.op-tabs {
+  display: flex;
+  gap: 4px;
+  background: #0d1117;
+  padding: 2px;
+  border-radius: 6px;
+}
+
+.op-tab {
+  padding: 4px 8px;
+  font-size: 11px;
+  font-family: var(--font-ui);
+  border: none;
+  border-radius: 4px;
+  cursor: pointer;
+  white-space: nowrap;
+  transition:
+    background-color var(--dur-hover) var(--ease-out),
+    color var(--dur-hover) var(--ease-out),
+    box-shadow var(--dur-hover) var(--ease-out),
+    transform var(--dur-press) var(--ease-out);
+}
+
+.op-tab[data-active="true"] {
+  font-weight: 600;
+  box-shadow: inset 0 0 0 1px rgba(88, 166, 255, 0.35);
+}
+
+.op-tab:active {
+  transform: scale(0.97);
+}
+
+/* ------------------------------------------------------------------ */
+/* Buttons                                                             */
+/* ------------------------------------------------------------------ */
+
+.op-btn {
+  padding: 4px 8px;
+  font-size: 11px;
+  font-family: var(--font-ui);
+  border-radius: 4px;
+  cursor: pointer;
+  font-variant-numeric: tabular-nums;
+  white-space: nowrap;
+  transition:
+    background-color var(--dur-hover) var(--ease-out),
+    color var(--dur-hover) var(--ease-out),
+    border-color var(--dur-hover) var(--ease-out),
+    filter var(--dur-hover) var(--ease-out),
+    transform var(--dur-press) var(--ease-out);
+}
+
+.op-btn:active {
+  transform: scale(0.97);
+}
+
+/* Hover effects gated to real pointers (touch taps must not stick). */
+@media (hover: hover) and (pointer: fine) {
+  .op-btn:hover {
+    filter: brightness(1.18);
+  }
+
+  .op-tab:hover:not([data-active="true"]) {
+    filter: brightness(1.35);
+  }
+}
+
+.op-btn:focus-visible,
+.op-tab:focus-visible {
+  outline: 2px solid var(--focus-ring);
+  outline-offset: 2px;
+}
+
+/* ------------------------------------------------------------------ */
+/* Layout                                                              */
+/* ------------------------------------------------------------------ */
+
+.op-content {
+  flex: 1;
+  min-height: 0;
+  display: flex;
+  flex-direction: column;
+}
+
+.op-bottom-split {
+  display: flex;
+  flex-direction: row;
+  height: 280px;
+  flex-shrink: 0;
+  min-height: 0;
+}
+
+.op-topology-panel {
+  flex: 1;
+  min-width: 0;
+  height: 100%;
+}
+
+.op-telemetry-panel {
+  width: 480px;
+  flex-shrink: 0;
+  height: 100%;
+  min-width: 0;
+  border-left: 1px solid var(--op-border, #30363d);
+}
+
+.op-hscroll {
+  scrollbar-width: thin;
+  scrollbar-color: var(--border-subtle) transparent;
+}
+
+.op-hscroll::-webkit-scrollbar {
+  height: 10px;
+}
+
+.op-hscroll::-webkit-scrollbar-track {
+  background: transparent;
+}
+
+.op-hscroll::-webkit-scrollbar-thumb {
+  background: var(--border-subtle);
+  border-radius: 5px;
+}
+
+@media (max-width: 1180px) {
+  .op-viewport-metric {
+    display: none;
+  }
+}
+
+/* ------------------------------------------------------------------ */
+/* React Flow chrome themed from the topology --tp-* tokens            */
+/* (no hardcoded white pills in dark mode)                             */
+/* ------------------------------------------------------------------ */
+
+.react-flow__controls {
+  box-shadow: var(--tp-shadow, none);
+  border: 1px solid var(--tp-border, #30363d);
+  border-radius: 6px;
+  overflow: hidden;
+}
+
+.react-flow__controls-button {
+  background: var(--tp-node-header, #21262d) !important;
+  border-bottom: 1px solid var(--tp-border, #30363d) !important;
+  color: var(--tp-text, #e6edf3) !important;
+  width: 24px !important;
+  height: 24px !important;
+}
+
+.react-flow__controls-button:last-child {
+  border-bottom: none !important;
+}
+
+.react-flow__controls-button svg {
+  fill: var(--tp-text, #e6edf3) !important;
+  max-width: 12px;
+  max-height: 12px;
+}
+
+.react-flow__controls-button:disabled svg {
+  fill: var(--tp-muted, #8b949e) !important;
+}
+
+@media (hover: hover) and (pointer: fine) {
+  .react-flow__controls-button:hover {
+    background: var(--tp-border, #30363d) !important;
+  }
+}
+
+.react-flow__minimap {
+  background: var(--tp-node-bg, #161b22) !important;
+  border: 1px solid var(--tp-border, #30363d);
+  border-radius: 6px;
+  pointer-events: none; /* decorative only */
+}
+
+.react-flow__minimap-mask {
+  fill: var(--tp-bg, #0d1117);
+}
+
+.react-flow__attribution {
+  background: transparent !important;
+}
+
+.react-flow__attribution a {
+  color: var(--tp-muted, #8b949e) !important;
+  font-size: 9px;
+}
+
+/* ------------------------------------------------------------------ */
+/* Narrow layout: stack topology above telemetry below ~1100px so the  */
+/* 280px split panel can never squeeze either canvas into a strip.     */
+/* ------------------------------------------------------------------ */
+
+@media (max-width: 1100px) {
+  .op-bottom-split {
+    flex-direction: column;
+    height: 260px;
+  }
+
+  .op-topology-panel {
+    flex: 1 1 55%;
+    height: auto;
+    min-height: 0;
+  }
+
+  .op-telemetry-panel {
+    width: 100%;
+    height: 45%;
+    border-left: none;
+    border-top: 1px solid var(--op-border, #30363d);
+  }
+
+  .op-telemetry-panel [data-testid="telemetry-chart"] {
+    height: 100% !important;
+  }
+
+  .op-telemetry-meta {
+    display: none;
+  }
+
+  .op-telemetry-header {
+    padding: 2px 8px !important;
+  }
+
+  /* Defensive: the minimap is already hidden by the topology container
+     width/height threshold, but never let it cover nodes on narrow layouts. */
+  .react-flow__minimap {
+    display: none;
+  }
+}
+
+@media (max-width: 1100px) and (max-height: 720px) {
+  .op-bottom-split {
+    height: 240px;
+  }
+
+  .op-logic-panel {
+    height: 96px !important;
+  }
+}
+
+@media (max-width: 760px) {
+  .op-actions .op-selection span:nth-child(2),
+  .op-actions .op-selection span:nth-child(3) {
+    display: none;
+  }
+}
+
+/* ------------------------------------------------------------------ */
+/* Reduced motion: keep opacity/colour feedback, remove movement        */
+/* ------------------------------------------------------------------ */
+
+@media (prefers-reduced-motion: reduce) {
+  .op-btn,
+  .op-tab {
+    transition-property: background-color, color, border-color;
+    transition-duration: 100ms;
+  }
+
+  .op-btn:active,
+  .op-tab:active {
+    transform: none;
+  }
+}

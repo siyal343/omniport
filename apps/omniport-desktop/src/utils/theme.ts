@@ -22,6 +22,9 @@ export interface MonitorTheme {
   pinLow: string;
   pinEdge: string;
   pinText: string;
+  /** Topology graph node body / node header surfaces. */
+  nodeBackground: string;
+  nodeHeaderBackground: string;
 }
 
 export const darkTheme: MonitorTheme = {
@@ -41,9 +44,11 @@ export const darkTheme: MonitorTheme = {
   selectionFill: "rgba(56, 139, 253, 0.25)",
   hoverFill: "rgba(110, 118, 129, 0.12)",
   pinHigh: "#2ea043", // Green HIGH
-  pinLow: "#21262d",  // Muted LOW
+  pinLow: "#21262d", // Muted LOW
   pinEdge: "#58a6ff", // Transition pulse
   pinText: "#e6edf3",
+  nodeBackground: "#161b22",
+  nodeHeaderBackground: "#21262d",
 };
 
 export const lightTheme: MonitorTheme = {
@@ -66,6 +71,8 @@ export const lightTheme: MonitorTheme = {
   pinLow: "#eaeef2",
   pinEdge: "#0969da",
   pinText: "#1f2328",
+  nodeBackground: "#f6f8fa",
+  nodeHeaderBackground: "#eaeef2",
 };
 
 export function getTheme(isDark = true): MonitorTheme {

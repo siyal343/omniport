@@ -1,4 +1,4 @@
-import React, { useState, useCallback } from "react";
+import React, { useCallback, useEffect, useRef, useState } from "react";
 import {
   ReactFlow,
   Background,
@@ -7,6 +7,8 @@ import {
   Panel,
   useNodesState,
   useEdgesState,
+  useNodesInitialized,
+  useReactFlow,
   addEdge,
   type Connection,
   type EdgeTypes,
@@ -21,6 +23,8 @@ import { MergerNode } from "./nodes/MergerNode.tsx";
 import { FaultNode } from "./nodes/FaultNode.tsx";
 import { AnimatedRouteEdge } from "./edges/AnimatedRouteEdge.tsx";
 import type { OmniPortNode, OmniPortEdge } from "./topologyTypes.ts";
+import { initialNodes, initialEdges, createVirtualPairNode, createFaultNode } from "./topologyData.ts";
+import { type MonitorTheme, darkTheme, lightTheme } from "../../utils/theme.ts";
 
 const nodeTypes: NodeTypes = {
   endpoint: EndpointNode,
@@ -33,158 +37,77 @@ const edgeTypes: EdgeTypes = {
   animated: AnimatedRouteEdge,
 };
 
-// Default initial routing topology
-const initialNodes: OmniPortNode[] = [
-  {
-    id: "ep-1",
-    type: "endpoint",
-    position: { x: 50, y: 100 },
-    data: {
-      label: "HOST UART",
-      kind: "uart",
-      portPath: "COM1",
-      baudRate: 115200,
-      dataBits: 8,
-      parity: "none",
-      stopBits: 1,
-      status: "connected",
-      rxBytes: 142080,
-      txBytes: 89450,
-      errorCount: 0,
-    },
-  },
-  {
-    id: "splitter-1",
-    type: "splitter",
-    position: { x: 330, y: 100 },
-    data: {
-      label: "ROUTE SPLITTER",
-      fanoutCount: 2,
-      queueCapacity: 1024,
-      dropPolicy: "drop_oldest",
-    },
-  },
-  {
-    id: "fault-1",
-    type: "fault",
-    position: { x: 580, y: 60 },
-    data: {
-      label: "HIL JITTER INJECTOR",
-      config: {
-        enabled: true,
-        fixedDelayMs: 5,
-        gaussianJitterMeanMs: 2,
-        gaussianJitterStdDevMs: 1.5,
-        bitErrorRate: 1e-4,
-        burstErrorProb: 0.01,
-        corruptNthCrc: 0,
-      },
-    },
-  },
-  {
-    id: "ep-2",
-    type: "endpoint",
-    position: { x: 860, y: 60 },
-    data: {
-      label: "DUT VIRTUAL PAIR",
-      kind: "virtual_pair",
-      portPath: "COM3",
-      baudRate: 115200,
-      dataBits: 8,
-      parity: "none",
-      stopBits: 1,
-      status: "connected",
-      rxBytes: 89450,
-      txBytes: 142080,
-      errorCount: 2,
-    },
-  },
-  {
-    id: "ep-3",
-    type: "endpoint",
-    position: { x: 860, y: 220 },
-    data: {
-      label: "WIRESHARK EXTCAP",
-      kind: "pty",
-      portPath: "\\\\.\\pipe\\omniport_extcap",
-      baudRate: 921600,
-      dataBits: 8,
-      parity: "none",
-      stopBits: 1,
-      status: "connected",
-      rxBytes: 231530,
-      txBytes: 0,
-      errorCount: 0,
-    },
-  },
-];
+const FIT_OPTIONS = {
+  padding: 0.18,
+  duration: 0,
+  minZoom: 0.15,
+  maxZoom: 1.1,
+} as const;
 
-const initialEdges: OmniPortEdge[] = [
-  {
-    id: "e-ep1-split",
-    source: "ep-1",
-    target: "splitter-1",
-    type: "animated",
-    data: {
-      sourceEndpointId: 1,
-      targetEndpointId: 100,
-      packetRate: 140,
-      bandwidthBps: 112000,
-      hasErrors: false,
-      active: true,
-    },
-  },
-  {
-    id: "e-split-fault",
-    source: "splitter-1",
-    target: "fault-1",
-    type: "animated",
-    data: {
-      sourceEndpointId: 100,
-      targetEndpointId: 200,
-      packetRate: 140,
-      bandwidthBps: 112000,
-      hasErrors: false,
-      active: true,
-    },
-  },
-  {
-    id: "e-fault-ep2",
-    source: "fault-1",
-    target: "ep-2",
-    type: "animated",
-    data: {
-      sourceEndpointId: 200,
-      targetEndpointId: 2,
-      packetRate: 138,
-      bandwidthBps: 110400,
-      hasErrors: true,
-      active: true,
-    },
-  },
-  {
-    id: "e-split-ep3",
-    source: "splitter-1",
-    target: "ep-3",
-    type: "animated",
-    data: {
-      sourceEndpointId: 100,
-      targetEndpointId: 3,
-      packetRate: 140,
-      bandwidthBps: 112000,
-      hasErrors: false,
-      active: true,
-    },
-  },
-];
+/**
+ * Fits the graph into its own container after node dimensions are measured and
+ * whenever the container resizes. Without this the split-workbench panel (which
+ * mounts at ~960x280, much smaller than the full-tab view) kept the initial
+ * zoom and clipped the right-hand endpoint nodes behind the telemetry panel.
+ */
+const FitViewController: React.FC<{ width: number; height: number; nodeCount: number }> = ({
+  width,
+  height,
+  nodeCount,
+}) => {
+  const flow = useReactFlow();
+  const nodesInitialized = useNodesInitialized();
+
+  useEffect(() => {
+    if (!nodesInitialized || width <= 0 || height <= 0) return;
+    const raf = requestAnimationFrame(() => {
+      flow.fitView(FIT_OPTIONS);
+    });
+    return () => cancelAnimationFrame(raf);
+  }, [flow, nodesInitialized, width, height, nodeCount]);
+
+  return null;
+};
 
 export interface TopologyCanvasProps {
   onRouteCreated?: (sourceId: string, targetId: string) => void;
+  /** Theme tokens so the graph follows the workbench dark/light toggle. */
+  theme?: MonitorTheme;
 }
 
-export const TopologyCanvas: React.FC<TopologyCanvasProps> = ({ onRouteCreated }) => {
+export const TopologyCanvas: React.FC<TopologyCanvasProps> = ({
+  onRouteCreated,
+  theme = darkTheme,
+}) => {
   const [nodes, setNodes, onNodesChange] = useNodesState<OmniPortNode>(initialNodes);
   const [edges, setEdges, onEdgesChange] = useEdgesState<OmniPortEdge>(initialEdges);
+  const containerRef = useRef<HTMLDivElement>(null);
+  const [containerSize, setContainerSize] = useState({ width: 0, height: 0 });
+
+  // Track container size: drives fit-on-resize and minimap visibility.
+  useEffect(() => {
+    const element = containerRef.current;
+    if (!element) return;
+    let raf = 0;
+    const observer = new ResizeObserver((entries) => {
+      const entry = entries[0];
+      if (!entry) return;
+      const width = Math.floor(entry.contentRect.width);
+      const height = Math.floor(entry.contentRect.height);
+      if (width <= 0 || height <= 0) return;
+      cancelAnimationFrame(raf);
+      raf = requestAnimationFrame(() => {
+        setContainerSize((prev) =>
+          prev.width === width && prev.height === height ? prev : { width, height }
+        );
+      });
+    });
+    observer.observe(element);
+    return () => {
+      observer.disconnect();
+      cancelAnimationFrame(raf);
+    };
+  }, []);
 
   const onConnect = useCallback(
     (connection: Connection) => {
@@ -212,53 +135,39 @@ export const TopologyCanvas: React.FC<TopologyCanvasProps> = ({ onRouteCreated }
     [setEdges, onRouteCreated]
   );
 
-  const addVirtualPair = () => {
-    const id = `ep-${nodes.length + 1}`;
-    const newNode: OmniPortNode = {
-      id,
-      type: "endpoint",
-      position: { x: 100 + Math.random() * 200, y: 150 + Math.random() * 150 },
-      data: {
-        label: `VIRTUAL COM${nodes.length + 4}`,
-        kind: "virtual_pair",
-        portPath: `COM${nodes.length + 4}`,
-        baudRate: 115200,
-        dataBits: 8,
-        parity: "none",
-        stopBits: 1,
-        status: "connected",
-        rxBytes: 0,
-        txBytes: 0,
-        errorCount: 0,
-      },
-    };
-    setNodes((nds) => [...nds, newNode]);
-  };
+  const addVirtualPair = useCallback(() => {
+    setNodes((current) => [...current, createVirtualPairNode(current)]);
+  }, [setNodes]);
 
-  const addFaultNode = () => {
-    const id = `fault-${nodes.length + 1}`;
-    const newNode: OmniPortNode = {
-      id,
-      type: "fault",
-      position: { x: 450 + Math.random() * 100, y: 150 + Math.random() * 100 },
-      data: {
-        label: "FAULT INJECTOR",
-        config: {
-          enabled: true,
-          fixedDelayMs: 10,
-          gaussianJitterMeanMs: 5,
-          gaussianJitterStdDevMs: 2,
-          bitErrorRate: 1e-3,
-          burstErrorProb: 0.05,
-          corruptNthCrc: 10,
-        },
-      },
-    };
-    setNodes((nds) => [...nds, newNode]);
-  };
+  const addFaultInjector = useCallback(() => {
+    setNodes((current) => [...current, createFaultNode(current)]);
+  }, [setNodes]);
+
+  const isLight = theme === lightTheme;
+  // Decorative minimap only where it cannot cover nodes (full-tab view);
+  // the 280px split panel always hides it.
+  const showMinimap = containerSize.width >= 1000 && containerSize.height >= 500;
+  // The floating "add node" panel would cover fitted nodes in the short
+  // split-workbench strip; the Visual Topology tab keeps it available.
+  const showAddPanel = containerSize.height >= 240;
+
+  const graphStyle = {
+    width: "100%",
+    height: "100%",
+    backgroundColor: theme.background,
+    "--tp-bg": theme.background,
+    "--tp-node-bg": theme.nodeBackground,
+    "--tp-node-header": theme.nodeHeaderBackground,
+    "--tp-border": theme.borderColor,
+    "--tp-text": theme.asciiText,
+    "--tp-muted": theme.headerText,
+    "--tp-shadow": isLight
+      ? "0 1px 3px rgba(31, 35, 40, 0.14)"
+      : "0 4px 12px rgba(0, 0, 0, 0.3)",
+  } as React.CSSProperties;
 
   return (
-    <div style={{ width: "100%", height: "100%", backgroundColor: "#0d1117" }}>
+    <div ref={containerRef} data-testid="topology-canvas" style={graphStyle}>
       <style>{`
         @keyframes dashdraw {
           from { stroke-dashoffset: 20; }
@@ -274,59 +183,64 @@ export const TopologyCanvas: React.FC<TopologyCanvasProps> = ({ onRouteCreated }
         nodeTypes={nodeTypes}
         edgeTypes={edgeTypes}
         fitView
+        fitViewOptions={{ padding: 0.18 }}
+        minZoom={0.15}
+        maxZoom={1.1}
       >
-        <Background variant={BackgroundVariant.Dots} gap={16} size={1} color="#21262d" />
-        <Controls
-          style={{
-            backgroundColor: "#161b22",
-            border: "1px solid #30363d",
-            borderRadius: 6,
-            color: "#e6edf3",
-          }}
+        <FitViewController
+          width={containerSize.width}
+          height={containerSize.height}
+          nodeCount={nodes.length}
         />
-        <MiniMap
-          nodeColor="#30363d"
-          maskColor="rgba(13, 17, 23, 0.75)"
-          style={{
-            backgroundColor: "#161b22",
-            border: "1px solid #30363d",
-            borderRadius: 6,
-          }}
-        />
+        <Background variant={BackgroundVariant.Dots} gap={16} size={1} color={theme.borderColor} />
+        <Controls />
+        {showMinimap && (
+          <MiniMap
+            nodeColor={theme.borderColor}
+            maskColor={isLight ? "rgba(246, 248, 250, 0.75)" : "rgba(13, 17, 23, 0.75)"}
+            pannable={false}
+            zoomable={false}
+            aria-hidden
+          />
+        )}
 
         {/* Top Control Panel */}
-        <Panel position="top-right" style={{ display: "flex", gap: 8 }}>
-          <button
-            onClick={addVirtualPair}
-            style={{
-              padding: "5px 10px",
-              backgroundColor: "#21262d",
-              border: "1px solid #30363d",
-              borderRadius: 6,
-              color: "#58a6ff",
-              fontSize: 11,
-              fontWeight: 600,
-              cursor: "pointer",
-            }}
-          >
-            + Add Port Endpoint
-          </button>
-          <button
-            onClick={addFaultNode}
-            style={{
-              padding: "5px 10px",
-              backgroundColor: "#21262d",
-              border: "1px solid #30363d",
-              borderRadius: 6,
-              color: "#f85149",
-              fontSize: 11,
-              fontWeight: 600,
-              cursor: "pointer",
-            }}
-          >
-            + Add Fault Injector
-          </button>
-        </Panel>
+        {showAddPanel && (
+          <Panel position="top-right" style={{ display: "flex", gap: 8 }}>
+            <button
+              type="button"
+              className="op-btn"
+              onClick={addVirtualPair}
+              style={{
+                padding: "5px 10px",
+                backgroundColor: theme.nodeHeaderBackground,
+                border: `1px solid ${theme.borderColor}`,
+                borderRadius: 6,
+                color: "#58a6ff",
+                fontSize: 11,
+                fontWeight: 600,
+              }}
+            >
+              + Add Port Endpoint
+            </button>
+            <button
+              type="button"
+              className="op-btn"
+              onClick={addFaultInjector}
+              style={{
+                padding: "5px 10px",
+                backgroundColor: theme.nodeHeaderBackground,
+                border: `1px solid ${theme.borderColor}`,
+                borderRadius: 6,
+                color: "#f85149",
+                fontSize: 11,
+                fontWeight: 600,
+              }}
+            >
+              + Add Fault Injector
+            </button>
+          </Panel>
+        )}
       </ReactFlow>
     </div>
   );

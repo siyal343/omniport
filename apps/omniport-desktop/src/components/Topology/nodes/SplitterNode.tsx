@@ -7,13 +7,13 @@ export const SplitterNode: React.FC<NodeProps<SplitterNodeType>> = ({ data }) =>
     <div
       style={{
         width: 180,
-        backgroundColor: "#161b22",
+        backgroundColor: "var(--tp-node-bg, #161b22)",
         border: "1px solid #30363d",
         borderRadius: 8,
-        color: "#e6edf3",
+        color: "var(--tp-text, #e6edf3)",
         fontSize: 11,
         fontFamily: 'SFMono-Regular, Consolas, "Liberation Mono", Menlo, monospace',
-        boxShadow: "0 4px 12px rgba(0,0,0,0.3)",
+        boxShadow: "var(--tp-shadow, 0 4px 12px rgba(0,0,0,0.3))",
       }}
     >
       <Handle
@@ -25,7 +25,7 @@ export const SplitterNode: React.FC<NodeProps<SplitterNodeType>> = ({ data }) =>
       <div
         style={{
           padding: "6px 10px",
-          backgroundColor: "#1f242c",
+          backgroundColor: "var(--tp-node-header, #21262d)",
           borderTopLeftRadius: 7,
           borderTopRightRadius: 7,
           borderBottom: "1px solid #30363d",
@@ -36,15 +36,15 @@ export const SplitterNode: React.FC<NodeProps<SplitterNodeType>> = ({ data }) =>
         }}
       >
         <span>{data.label}</span>
-        <span style={{ fontSize: 9, color: "#8b949e" }}>1:{data.fanoutCount} SPLIT</span>
+        <span style={{ fontSize: 9, color: "var(--tp-muted, #8b949e)" }}>1:{data.fanoutCount} SPLIT</span>
       </div>
 
       <div style={{ padding: "8px 10px", display: "flex", flexDirection: "column", gap: 4 }}>
-        <div style={{ display: "flex", justifyContent: "space-between", color: "#8b949e" }}>
+        <div style={{ display: "flex", justifyContent: "space-between", color: "var(--tp-muted, #8b949e)" }}>
           <span>Queue:</span>
-          <span style={{ color: "#e6edf3" }}>{data.queueCapacity} pkts</span>
+          <span style={{ color: "var(--tp-text, #e6edf3)" }}>{data.queueCapacity} pkts</span>
         </div>
-        <div style={{ display: "flex", justifyContent: "space-between", color: "#8b949e" }}>
+        <div style={{ display: "flex", justifyContent: "space-between", color: "var(--tp-muted, #8b949e)" }}>
           <span>Policy:</span>
           <span style={{ color: "#d29922" }}>{data.dropPolicy}</span>
         </div>

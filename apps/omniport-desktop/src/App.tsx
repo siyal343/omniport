@@ -1,83 +1,69 @@
-import React, { useState, useEffect, useCallback } from "react";
+import React, { useCallback, useEffect, useMemo, useState } from "react";
+import { invoke } from "@tauri-apps/api/core";
 import { SerialWorkbench } from "./components/SerialWorkbench/SerialWorkbench.tsx";
 import { fetchViewport } from "./ipc/viewportClient.ts";
-import { type ViewportBatch } from "./ipc/viewportDecoder.ts";
-import { PinFlags, FrameFlags } from "./types/serial.ts";
+import { createDemoViewport } from "./ipc/demoStream.ts";
+import { createViewportSession } from "./ipc/useViewportSession.ts";
+import type { ViewportSource, ViewportSourceKind } from "./ipc/viewportSession.ts";
+import { parseCaptureStatus, type HostCaptureStatus } from "./ipc/captureStatus.ts";
 
 export const App: React.FC = () => {
-  const [totalPackets, setTotalPackets] = useState<bigint>(0n);
-  const isTauri = typeof window !== "undefined" && ("__TAURI_INTERNALS__" in window || "__TAURI__" in window);
+  const isTauri =
+    typeof window !== "undefined" &&
+    ("__TAURI_INTERNALS__" in window || "__TAURI__" in window);
+  const sourceKind: ViewportSourceKind = isTauri ? "tauri" : "demo";
 
-  // Fallback synthetic stream generator when running in standard browser dev mode
-  const mockFetchViewport = useCallback(
-    async (startRow: number, rowCount: number): Promise<ViewportBatch> => {
-      const mockTotal = 2500n;
-      const rows = [];
-      const baseTime = 1_700_000_000_000_000_000n;
+  // Tauri adapter: NO demo fallback on IPC failure — the session surfaces
+  // status "error" and the workbench renders CAPTURE DISCONNECTED. Browser dev
+  // uses the single demo adapter and stays labelled DEMO STREAM.
+  const source = useMemo<ViewportSource>(() => {
+    if (isTauri) {
+      return { read: (startRow: number, rowCount: number) => fetchViewport(startRow, rowCount) };
+    }
+    return {
+      read: async (startRow: number, rowCount: number) =>
+        createDemoViewport({ startRow, rowCount }),
+    };
+  }, [isTauri]);
 
-      const endRow = Math.min(Number(mockTotal), startRow + rowCount);
-      for (let i = startRow; i < endRow; i++) {
-        let pins = PinFlags.RTS | PinFlags.DTR;
-        if (i % 6 === 0) pins |= PinFlags.CTS;
-        if (i % 10 === 0) pins |= PinFlags.DCD;
-        if (i % 14 === 0) pins &= ~PinFlags.RTS;
-
-        const isTx = i % 2 === 0;
-        const isErr = i % 29 === 0;
-        let flags = isTx ? FrameFlags.DIR_TX : 0;
-        if (isErr) flags |= FrameFlags.ERR_CRC;
-
-        const msg = isErr
-          ? "ERR_CRC_CHECKSUM"
-          : isTx
-          ? `TX_COMMAND_SERIAL_${i}`
-          : `RX_TELEMETRY_RESPONSE_${i}`;
-        const payload = new Uint8Array(Array.from(msg, (c) => c.charCodeAt(0)));
-
-        rows.push({
-          timestampNs: baseTime + BigInt(i * 5_000_000), // +5ms intervals
-          endpointId: isTx ? 1 : 2,
-          flags,
-          pins,
-          payload,
-        });
-      }
-
-      return { totalPackets: mockTotal, rows };
-    },
-    []
+  // One window owner for the whole app lifetime. Not disposed on unmount:
+  // under React StrictMode the effect cleanup would kill the session between
+  // the double-mount, and the SPA has a single page-long lifetime anyway.
+  const session = useMemo(
+    () =>
+      createViewportSession(source, {
+        rowHeightPx: 22,
+        overscanRows: 10,
+        sourceKind,
+        initialTotalRows: 0,
+      }),
+    [source, sourceKind]
   );
 
-  const handleFetchViewport = useCallback(
-    async (startRow: number, rowCount: number): Promise<ViewportBatch> => {
-      if (isTauri) {
-        try {
-          const batch = await fetchViewport(startRow, rowCount);
-          setTotalPackets(batch.totalPackets);
-          return batch;
-        } catch {
-          return mockFetchViewport(startRow, rowCount);
-        }
-      } else {
-        const batch = await mockFetchViewport(startRow, rowCount);
-        setTotalPackets(batch.totalPackets);
-        return batch;
-      }
-    },
-    [isTauri, mockFetchViewport]
-  );
+  // Host truth about demo seeding (Tauri only). Missing command / older host is
+  // "unknown", never an error.
+  const [hostStatus, setHostStatus] = useState<HostCaptureStatus | null>(null);
+  const readCaptureStatus = useCallback(async () => {
+    try {
+      const raw = await invoke<unknown>("capture_status");
+      setHostStatus(parseCaptureStatus(raw));
+    } catch (err) {
+      setHostStatus(null);
+      console.warn("capture_status unavailable (older host?):", err);
+    }
+  }, []);
 
   useEffect(() => {
-    // Initial fetch to get packet count
-    handleFetchViewport(0, 50).catch(console.error);
-  }, [handleFetchViewport]);
+    if (!isTauri) return;
+    void readCaptureStatus();
+  }, [isTauri, readCaptureStatus]);
 
   return (
     <div style={{ width: "100vw", height: "100vh", overflow: "hidden" }}>
       <SerialWorkbench
-        totalPackets={totalPackets}
-        onFetchViewport={handleFetchViewport}
-        isDark={true}
+        session={session}
+        isDark
+        hostDemoMode={hostStatus?.demoMode ?? null}
       />
     </div>
   );
