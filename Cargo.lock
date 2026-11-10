@@ -470,6 +470,7 @@ dependencies = [
  "memmap2",
  "omniport-core",
  "proptest",
+ "serde_json",
  "tempfile",
  "thiserror",
  "tokio",

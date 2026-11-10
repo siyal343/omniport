@@ -44,7 +44,10 @@ pub fn extcap_config_output() -> String {
         .to_string()
 }
 
-/// Real-time live PCAPNG streamer writing to a Wireshark named pipe (Windows) or FIFO (POSIX)
+/// Real-time live PCAPNG streamer writing to a Wireshark named pipe (Windows) or FIFO (POSIX).
+///
+/// Viewport rows are decoded by [`crate::viewport::ViewportBatch`], the single owner
+/// of the ICD §2 layout; this type only writes them as PCAPNG packets.
 pub struct NamedPipeStreamer {
     writer: PcapngWriter<File>,
 }
@@ -101,42 +104,21 @@ impl NamedPipeStreamer {
         stop: &AtomicBool,
     ) -> Result<u64, ExtcapError> {
         let mut streamed_count = 0u64;
-        let mut viewport_buf = Vec::with_capacity(65536);
 
         while !stop.load(Ordering::Relaxed) {
             let total_packets = engine.packet_count();
             if current_row < total_packets {
                 let fetch_count = (total_packets - current_row).min(256) as usize;
-                viewport_buf.clear();
-                engine.read_viewport(current_row, fetch_count, &mut viewport_buf);
+                let batch = engine.read_viewport_batch(current_row, fetch_count);
 
-                // Decode viewport rows per ICD format:
-                // Header (16B): [total: u64 (8B)][returned: u32 (4B)][reserved: u32 (4B)]
-                if viewport_buf.len() >= 16 {
-                    let returned_rows =
-                        u32::from_le_bytes(viewport_buf[8..12].try_into().unwrap()) as usize;
-                    let mut offset = 16;
-                    for _ in 0..returned_rows {
-                        if offset + 24 > viewport_buf.len() {
-                            break;
-                        }
-                        let ts_ns = u64::from_le_bytes(
-                            viewport_buf[offset..offset + 8].try_into().unwrap(),
-                        );
-                        let payload_len = u32::from_le_bytes(
-                            viewport_buf[offset + 16..offset + 20].try_into().unwrap(),
-                        ) as usize;
-                        let flags = viewport_buf[offset + 22];
-                        offset += 24;
+                for row in batch.rows() {
+                    self.writer
+                        .write_packet(row.timestamp_ns, row.payload, row.flags.bits())?;
+                    current_row += 1;
+                    streamed_count += 1;
+                }
 
-                        if offset + payload_len <= viewport_buf.len() {
-                            let payload = &viewport_buf[offset..offset + payload_len];
-                            self.writer.write_packet(ts_ns, payload, flags)?;
-                            offset += payload_len;
-                            current_row += 1;
-                            streamed_count += 1;
-                        }
-                    }
+                if !batch.rows().is_empty() {
                     self.writer.flush()?;
                 }
             } else {
@@ -181,6 +163,49 @@ mod tests {
         let config = extcap_config_output();
         assert!(config.contains("arg {number=0}"));
         assert!(config.contains("arg {number=1}"));
+    }
+
+    #[test]
+    fn test_stream_mmap_streams_every_row_exactly_once() {
+        use crate::pcapng::PcapngReader;
+        use omniport_core::{FrameFlags, PinState};
+
+        let dir = tempfile::tempdir().unwrap();
+        let mut engine = crate::MmapCaptureEngine::create(dir.path(), 16, 4096).unwrap();
+        for i in 0..3u32 {
+            engine.append_event(&SerialEvent {
+                timestamp_ns: 1_000 + i as u64,
+                source_id: 1,
+                flags: FrameFlags::empty(),
+                pins: PinState::empty(),
+                payload: bytes::Bytes::from(format!("ROW_{i}")),
+            });
+        }
+
+        let out_path = dir.path().join("stream.pcapng");
+        std::fs::File::create(&out_path).unwrap();
+        let stop = AtomicBool::new(false);
+        let mut streamer = NamedPipeStreamer::open_pipe(&out_path, LINKTYPE_USER0).unwrap();
+
+        std::thread::scope(|scope| {
+            scope.spawn(|| {
+                std::thread::sleep(Duration::from_millis(50));
+                stop.store(true, Ordering::Relaxed);
+            });
+            let streamed = streamer
+                .stream_mmap(&engine, 0, Duration::from_millis(1), &stop)
+                .unwrap();
+            assert_eq!(streamed, 3, "each capture row must stream exactly once");
+        });
+
+        let content = std::fs::read(&out_path).unwrap();
+        let packets = PcapngReader::new(content.as_slice())
+            .read_all_packets()
+            .unwrap();
+        assert_eq!(packets.len(), 3);
+        for (i, packet) in packets.iter().enumerate() {
+            assert_eq!(&packet.payload[..], format!("ROW_{i}").as_bytes());
+        }
     }
 
     #[test]

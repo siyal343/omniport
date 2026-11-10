@@ -249,8 +249,10 @@ impl<'a> Lexer<'a> {
             && (self.peek_next() == Some('x') || self.peek_next() == Some('X'));
 
         if is_hex {
-            s.push(self.advance().unwrap());
-            s.push(self.advance().unwrap());
+            // `peek`/`peek_next` above guarantee that both characters are present.
+            let _ = self.advance();
+            let _ = self.advance();
+            s.push_str("0x");
             while let Some(ch) = self.peek() {
                 if ch.is_ascii_hexdigit() {
                     s.push(ch);

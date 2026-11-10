@@ -16,6 +16,8 @@ pub enum ParseError {
     InvalidBitfieldWidth(String, usize, usize),
     #[error("Bitfield width {0} exceeds container type capacity {1} bits at line {2}")]
     BitfieldOverflow(usize, usize, usize),
+    #[error("Bitfields of floating-point type '{0}' are not supported at line {1}, column {2}")]
+    UnsupportedBitfieldType(String, usize, usize),
     #[error("No valid struct declaration found in input")]
     NoStructFound,
     #[error("Lexer error: {0}")]
@@ -213,8 +215,8 @@ impl<'a> CStructParser<'a> {
             let mut array_count = None;
             if self.match_token(&TokenKind::LBracket) {
                 let num_tok = self.advance().ok_or(ParseError::UnexpectedEof(0, 0))?;
-                let count = match num_tok.kind {
-                    TokenKind::Number(n) if n > 0 => n as usize,
+                let raw_count = match num_tok.kind {
+                    TokenKind::Number(n) if n > 0 => n,
                     _ => {
                         return Err(ParseError::InvalidArraySize(
                             format!("{:?}", num_tok.kind),
@@ -223,16 +225,21 @@ impl<'a> CStructParser<'a> {
                         ));
                     }
                 };
+                let count = usize::try_from(raw_count).map_err(|_| {
+                    ParseError::InvalidArraySize(raw_count.to_string(), num_tok.line, num_tok.col)
+                })?;
+                let count_line = num_tok.line;
+                let count_col = num_tok.col;
                 self.expect_token(&TokenKind::RBracket, "]")?;
-                array_count = Some(count);
+                array_count = Some((count, count_line, count_col));
             }
 
             // Check for bitfield: `: width`
             let mut bitfield_width = None;
             if self.match_token(&TokenKind::Colon) {
                 let num_tok = self.advance().ok_or(ParseError::UnexpectedEof(0, 0))?;
-                let width = match num_tok.kind {
-                    TokenKind::Number(n) if n > 0 => n as usize,
+                let raw_width = match num_tok.kind {
+                    TokenKind::Number(n) if n > 0 => n,
                     _ => {
                         return Err(ParseError::InvalidBitfieldWidth(
                             format!("{:?}", num_tok.kind),
@@ -241,9 +248,25 @@ impl<'a> CStructParser<'a> {
                         ));
                     }
                 };
+                let width = usize::try_from(raw_width).map_err(|_| {
+                    ParseError::InvalidBitfieldWidth(
+                        raw_width.to_string(),
+                        num_tok.line,
+                        num_tok.col,
+                    )
+                })?;
                 let max_bits = ty.size_bytes() * 8;
                 if width > max_bits {
                     return Err(ParseError::BitfieldOverflow(width, max_bits, num_tok.line));
+                }
+                // C forbids bitfields of floating-point type; accepting them here would
+                // produce a schema whose frames can never be dissected.
+                if matches!(ty, PrimitiveType::F32 | PrimitiveType::F64) {
+                    return Err(ParseError::UnsupportedBitfieldType(
+                        format!("{ty:?}"),
+                        num_tok.line,
+                        num_tok.col,
+                    ));
                 }
                 bitfield_width = Some(width);
             }
@@ -294,10 +317,13 @@ impl<'a> CStructParser<'a> {
                         s.current_bit += w;
                     }
                     _ => {
-                        // Flush previous bitfield if needed
+                        // A new bitfield container starts here. The previous container was
+                        // allocated as a full storage unit of its declared type, so the next
+                        // unit starts after its whole width (not just the used bits) - this
+                        // keeps the computed total_size large enough for the container the
+                        // bitfield extractor reads.
                         if let Some(s) = bitfield_state.take() {
-                            let bytes_used = s.current_bit.div_ceil(8);
-                            current_offset = s.container_offset + bytes_used;
+                            current_offset = s.container_offset + s.container_bytes;
                         }
 
                         let bit_offset = 0u8;
@@ -323,13 +349,23 @@ impl<'a> CStructParser<'a> {
                     }
                 }
             } else {
-                // Non-bitfield: flush bitfield container if active
+                // Non-bitfield: flush the active bitfield container. The whole storage
+                // unit is reserved (verified against the packed C reference layout), so the
+                // next member starts after the container, not merely after its used bits.
                 if let Some(s) = bitfield_state.take() {
-                    let bytes_used = s.current_bit.div_ceil(8);
-                    current_offset = s.container_offset + bytes_used;
+                    current_offset = s.container_offset + s.container_bytes;
                 }
 
-                if let Some(count) = array_count {
+                if let Some((count, line, col)) = array_count {
+                    // Array element counts come straight from user-supplied C source, so the
+                    // byte size must be computed with checked arithmetic instead of panicking
+                    // on overflow in debug builds.
+                    let array_bytes = ty.size_bytes().checked_mul(count).ok_or_else(|| {
+                        ParseError::InvalidArraySize(count.to_string(), line, col)
+                    })?;
+                    let next_offset = current_offset.checked_add(array_bytes).ok_or_else(|| {
+                        ParseError::InvalidArraySize(count.to_string(), line, col)
+                    })?;
                     fields.push(FieldDescriptor {
                         name: field_name,
                         offset: current_offset,
@@ -339,7 +375,7 @@ impl<'a> CStructParser<'a> {
                         plot_telemetry: plot,
                         kind: FieldKind::Array { count },
                     });
-                    current_offset += ty.size_bytes() * count;
+                    current_offset = next_offset;
                 } else {
                     fields.push(FieldDescriptor {
                         name: field_name,
@@ -357,10 +393,9 @@ impl<'a> CStructParser<'a> {
 
         self.expect_token(&TokenKind::RBrace, "}")?;
 
-        // Flush trailing bitfield
+        // Flush trailing bitfield: the container reserves its full storage unit.
         if let Some(s) = bitfield_state.take() {
-            let bytes_used = s.current_bit.div_ceil(8);
-            current_offset = s.container_offset + bytes_used;
+            current_offset = s.container_offset + s.container_bytes;
         }
 
         // Optional typedef trailing alias or attributes
@@ -441,9 +476,20 @@ impl<'a> CStructParser<'a> {
                             self.pos += 1;
                             Ok((PrimitiveType::U16, false))
                         }
-                        "int" | "long" => {
+                        "int" => {
                             self.pos += 1;
                             Ok((PrimitiveType::U32, false))
+                        }
+                        "long" => {
+                            self.pos += 1;
+                            // `unsigned long long` is 64-bit; plain `unsigned long` is
+                            // 32-bit on Windows (LLP64), the reference ABI here.
+                            if self.peek_ident_is("long") {
+                                self.pos += 1;
+                                Ok((PrimitiveType::U64, false))
+                            } else {
+                                Ok((PrimitiveType::U32, false))
+                            }
                         }
                         _ => Ok((PrimitiveType::U32, false)),
                     }
@@ -466,9 +512,18 @@ impl<'a> CStructParser<'a> {
                             self.pos += 1;
                             Ok((PrimitiveType::I16, true))
                         }
-                        "int" | "long" => {
+                        "int" => {
                             self.pos += 1;
                             Ok((PrimitiveType::I32, true))
+                        }
+                        "long" => {
+                            self.pos += 1;
+                            if self.peek_ident_is("long") {
+                                self.pos += 1;
+                                Ok((PrimitiveType::I64, true))
+                            } else {
+                                Ok((PrimitiveType::I32, true))
+                            }
                         }
                         _ => Ok((PrimitiveType::I32, true)),
                     }
@@ -477,13 +532,33 @@ impl<'a> CStructParser<'a> {
                 }
             }
             "short" => Ok((PrimitiveType::I16, true)),
-            "int" | "long" => Ok((PrimitiveType::I32, true)),
+            "int" => Ok((PrimitiveType::I32, true)),
+            "long" => {
+                // `long long` is 64-bit; plain `long` is 32-bit on Windows (LLP64).
+                if self.peek_ident_is("long") {
+                    self.pos += 1;
+                    Ok((PrimitiveType::I64, true))
+                } else {
+                    Ok((PrimitiveType::I32, true))
+                }
+            }
             other => Err(ParseError::UnknownType(
                 other.to_string(),
                 tok.line,
                 tok.col,
             )),
         }
+    }
+
+    /// Returns true when the current token is the identifier `expected`.
+    fn peek_ident_is(&self, expected: &str) -> bool {
+        matches!(
+            self.peek(),
+            Some(Token {
+                kind: TokenKind::Ident(s),
+                ..
+            }) if s == expected
+        )
     }
 
     /// Extracts scale, unit, and plot attributes from comments like:

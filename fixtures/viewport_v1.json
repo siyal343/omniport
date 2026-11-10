@@ -1,0 +1,237 @@
+{
+  "schema": "omniport.viewport.v1",
+  "frozen": true,
+  "generated_by": "fixtures/generate_viewport_fixture.mjs (independent ICD Section 2 oracle)",
+  "batch_header_bytes": 16,
+  "row_header_bytes": 24,
+  "endianness": "little",
+  "description": "Wire format from internal_docs/ICD.md Section 2: [total_packets: u64][returned_rows: u32][reserved: u32], then returned_rows * ([FrameIndexEntry: 24B][payload: payload_len bytes]). u64 values are decimal strings so JavaScript cannot lose precision.",
+  "cases": [
+    {
+      "id": "empty_store",
+      "comment": "No frames captured: header only, all zero.",
+      "start_row": "0",
+      "row_count": 10,
+      "total_packets": "0",
+      "events": [],
+      "wire_hex": "00000000000000000000000000000000",
+      "wire_len": 16,
+      "rows": []
+    },
+    {
+      "id": "out_of_range",
+      "comment": "Store has one frame, viewport starts past the end: total is reported, no rows returned.",
+      "start_row": "2",
+      "row_count": 5,
+      "total_packets": "1",
+      "events": [
+        {
+          "index": 0,
+          "timestamp_ns": "1000",
+          "endpoint_id": 1,
+          "flags": 1,
+          "pins": 5,
+          "payload_hex": "aa55"
+        }
+      ],
+      "wire_hex": "01000000000000000000000000000000",
+      "wire_len": 16,
+      "rows": []
+    },
+    {
+      "id": "slice_middle",
+      "comment": "Slice of a three-frame store: only the requested rows appear, data_offset still points into session.dat.",
+      "start_row": "1",
+      "row_count": 2,
+      "total_packets": "3",
+      "events": [
+        {
+          "index": 0,
+          "timestamp_ns": "1700000000000000000",
+          "endpoint_id": 1,
+          "flags": 1,
+          "pins": 1,
+          "payload_hex": "414243"
+        },
+        {
+          "index": 1,
+          "timestamp_ns": "1700000000005000000",
+          "endpoint_id": 2,
+          "flags": 0,
+          "pins": 20,
+          "payload_hex": "4445"
+        },
+        {
+          "index": 2,
+          "timestamp_ns": "1700000000010000000",
+          "endpoint_id": 1,
+          "flags": 2,
+          "pins": 8,
+          "payload_hex": "46474849"
+        }
+      ],
+      "wire_hex": "03000000000000000200000000000000404b7636fe9c97170300000000000000020000000200001444458096c236fe9c97170500000000000000040000000100020846474849",
+      "wire_len": 70,
+      "rows": [
+        {
+          "timestamp_ns": "1700000000005000000",
+          "endpoint_id": 2,
+          "flags": 0,
+          "pins": 20,
+          "payload_hex": "4445",
+          "data_offset": "3"
+        },
+        {
+          "timestamp_ns": "1700000000010000000",
+          "endpoint_id": 1,
+          "flags": 2,
+          "pins": 8,
+          "payload_hex": "46474849",
+          "data_offset": "5"
+        }
+      ]
+    },
+    {
+      "id": "full_page_bitcode",
+      "comment": "Every pin/flag bit crossing the seam: empty payload, zero bytes, 0xFF bytes, u64-max timestamp.",
+      "start_row": "0",
+      "row_count": 10,
+      "total_packets": "4",
+      "events": [
+        {
+          "index": 0,
+          "timestamp_ns": "1700000000000000000",
+          "endpoint_id": 1,
+          "flags": 1,
+          "pins": 5,
+          "payload_hex": "4f4d4e49504f52545f4652414d455f303030300d0a"
+        },
+        {
+          "index": 1,
+          "timestamp_ns": "1700000000000000001",
+          "endpoint_id": 65535,
+          "flags": 16,
+          "pins": 16,
+          "payload_hex": ""
+        },
+        {
+          "index": 2,
+          "timestamp_ns": "1700000000000000002",
+          "endpoint_id": 2,
+          "flags": 48,
+          "pins": 56,
+          "payload_hex": "00000000"
+        },
+        {
+          "index": 3,
+          "timestamp_ns": "18446744073709551615",
+          "endpoint_id": 7,
+          "flags": 64,
+          "pins": 127,
+          "payload_hex": "ffffffffffffffff"
+        }
+      ],
+      "wire_hex": "0400000000000000040000000000000000002a36fe9c9717000000000000000015000000010001054f4d4e49504f52545f4652414d455f303030300d0a01002a36fe9c9717150000000000000000000000ffff101002002a36fe9c97171500000000000000040000000200303800000000ffffffffffffffff1900000000000000080000000700407fffffffffffffffff",
+      "wire_len": 145,
+      "rows": [
+        {
+          "timestamp_ns": "1700000000000000000",
+          "endpoint_id": 1,
+          "flags": 1,
+          "pins": 5,
+          "payload_hex": "4f4d4e49504f52545f4652414d455f303030300d0a",
+          "data_offset": "0"
+        },
+        {
+          "timestamp_ns": "1700000000000000001",
+          "endpoint_id": 65535,
+          "flags": 16,
+          "pins": 16,
+          "payload_hex": "",
+          "data_offset": "21"
+        },
+        {
+          "timestamp_ns": "1700000000000000002",
+          "endpoint_id": 2,
+          "flags": 48,
+          "pins": 56,
+          "payload_hex": "00000000",
+          "data_offset": "21"
+        },
+        {
+          "timestamp_ns": "18446744073709551615",
+          "endpoint_id": 7,
+          "flags": 64,
+          "pins": 127,
+          "payload_hex": "ffffffffffffffff",
+          "data_offset": "25"
+        }
+      ]
+    },
+    {
+      "id": "clamped_count",
+      "comment": "row_count larger than the store: returned_rows is clamped to total_packets.",
+      "start_row": "0",
+      "row_count": 4096,
+      "total_packets": "2",
+      "events": [
+        {
+          "index": 0,
+          "timestamp_ns": "5",
+          "endpoint_id": 3,
+          "flags": 0,
+          "pins": 0,
+          "payload_hex": "cc"
+        },
+        {
+          "index": 1,
+          "timestamp_ns": "6",
+          "endpoint_id": 4,
+          "flags": 4,
+          "pins": 32,
+          "payload_hex": "dddddddd"
+        }
+      ],
+      "wire_hex": "02000000000000000200000000000000050000000000000000000000000000000100000003000000cc060000000000000001000000000000000400000004000420dddddddd",
+      "wire_len": 69,
+      "rows": [
+        {
+          "timestamp_ns": "5",
+          "endpoint_id": 3,
+          "flags": 0,
+          "pins": 0,
+          "payload_hex": "cc",
+          "data_offset": "0"
+        },
+        {
+          "timestamp_ns": "6",
+          "endpoint_id": 4,
+          "flags": 4,
+          "pins": 32,
+          "payload_hex": "dddddddd",
+          "data_offset": "1"
+        }
+      ]
+    },
+    {
+      "id": "absurd_start_row",
+      "comment": "start_row = u64::MAX must not overflow or panic; no rows are returned.",
+      "start_row": "18446744073709551615",
+      "row_count": 1,
+      "total_packets": "1",
+      "events": [
+        {
+          "index": 0,
+          "timestamp_ns": "9",
+          "endpoint_id": 1,
+          "flags": 0,
+          "pins": 0,
+          "payload_hex": "01"
+        }
+      ],
+      "wire_hex": "01000000000000000000000000000000",
+      "wire_len": 16,
+      "rows": []
+    }
+  ]
+}

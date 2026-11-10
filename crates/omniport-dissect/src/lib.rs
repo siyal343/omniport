@@ -81,10 +81,50 @@ impl PacketSchema {
         parser.parse()
     }
 
+    /// Returns the `[start, end)` byte span a field reads from the payload, or `None` when
+    /// the descriptor is internally inconsistent (offset/size overflow, bitfield that does
+    /// not fit its declared container type, zero-width bitfield).
+    fn field_byte_span(f: &FieldDescriptor) -> Option<(usize, usize)> {
+        let elem_size = f.ty.size_bytes();
+        let span = match &f.kind {
+            FieldKind::Scalar => elem_size,
+            FieldKind::Array { count } => elem_size.checked_mul(*count)?,
+            FieldKind::Bitfield {
+                bit_offset,
+                bit_width,
+                ..
+            } => {
+                let bit_offset = *bit_offset as usize;
+                let bit_width = *bit_width as usize;
+                let container_bits = elem_size * 8;
+                if bit_width == 0
+                    || bit_width > container_bits
+                    || bit_offset.checked_add(bit_width)? > container_bits
+                {
+                    return None;
+                }
+                // The whole storage unit is read to extract the bit range.
+                elem_size
+            }
+        };
+        let end = f.offset.checked_add(span)?;
+        Some((f.offset, end))
+    }
+
     /// Dissects binary frame bytes into scaled telemetry values
     pub fn dissect_frame(&self, payload: &[u8]) -> Option<Vec<DecodedField>> {
         if payload.len() < self.total_size {
             return None;
+        }
+
+        // Validate every descriptor's extent up-front: schemas can come from C source or be
+        // built by callers, and a malformed one must yield `None` rather than slice/shift
+        // panics while decoding an untrusted frame.
+        for f in &self.fields {
+            let (_, end) = Self::field_byte_span(f)?;
+            if end > payload.len() {
+                return None;
+            }
         }
 
         let mut out = Vec::with_capacity(self.fields.len());
@@ -147,12 +187,17 @@ impl PacketSchema {
                     };
                     let raw_bits = (raw_container >> bit_offset) & mask;
 
-                    let raw_val = if *signed && *bit_width < 64 {
-                        let sign_bit = 1u64 << (bit_width - 1);
-                        if (raw_bits & sign_bit) != 0 {
-                            (raw_bits | !mask) as i64 as f64
+                    let raw_val = if *signed {
+                        if *bit_width >= 64 {
+                            // A full-width signed bitfield is the two's-complement value.
+                            (raw_bits as i64) as f64
                         } else {
-                            raw_bits as i64 as f64
+                            let sign_bit = 1u64 << (bit_width - 1);
+                            if (raw_bits & sign_bit) != 0 {
+                                (raw_bits | !mask) as i64 as f64
+                            } else {
+                                raw_bits as i64 as f64
+                            }
                         }
                     } else {
                         raw_bits as f64
@@ -217,6 +262,53 @@ impl PacketSchema {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn test_dissect_frame_rejects_inconsistent_schema_without_panicking() {
+        // A caller-built schema whose field extent exceeds total_size/payload length must
+        // yield None instead of indexing past the payload slice.
+        let schema = PacketSchema {
+            name: "Inconsistent".into(),
+            endian: Endian::Little,
+            total_size: 1,
+            fields: vec![FieldDescriptor {
+                name: "wide".into(),
+                offset: 0,
+                ty: PrimitiveType::U32,
+                kind: FieldKind::Scalar,
+                scale: 1.0,
+                unit: None,
+                plot_telemetry: false,
+            }],
+        };
+        assert!(schema.dissect_frame(&[0u8; 1]).is_none());
+        assert!(schema.dissect_frame(&[]).is_none());
+        assert!(schema.dissect_frame(&[0u8; 4]).is_some());
+    }
+
+    #[test]
+    fn test_dissect_frame_rejects_invalid_bitfield_span() {
+        let schema = PacketSchema {
+            name: "BadBitfield".into(),
+            endian: Endian::Little,
+            total_size: 8,
+            fields: vec![FieldDescriptor {
+                name: "shift".into(),
+                offset: 0,
+                ty: PrimitiveType::U64,
+                kind: FieldKind::Bitfield {
+                    bit_offset: 64,
+                    bit_width: 4,
+                    signed: false,
+                },
+                scale: 1.0,
+                unit: None,
+                plot_telemetry: false,
+            }],
+        };
+        // bit_offset + bit_width > 64 would overflow the container shift.
+        assert!(schema.dissect_frame(&[0u8; 8]).is_none());
+    }
 
     #[test]
     fn test_c_struct_dissection_and_scaling() {

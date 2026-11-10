@@ -1,4 +1,4 @@
-use omniport_dissect::{Endian, PacketSchema};
+use omniport_dissect::{Endian, PacketSchema, PrimitiveType};
 use proptest::prelude::*;
 
 #[test]
@@ -116,6 +116,129 @@ fn test_multi_byte_bitfields() {
 
     assert_eq!(decoded[1].name, "status_flags");
     assert_eq!(decoded[1].value_f64, 10.0);
+}
+
+#[test]
+fn test_mixed_bitfield_container_types_layout() {
+    let c_code = r#"
+        struct __attribute__((packed)) MixedContainers {
+            uint8_t  a: 4;
+            uint16_t b: 4;
+        };
+    "#;
+    let schema = PacketSchema::from_c_struct(c_code, Endian::Little).unwrap();
+
+    // `a` owns one u8 container and `b` a full u16 container starting after it,
+    // so the packed struct is 3 bytes (matching the C compiler's layout).
+    assert_eq!(schema.total_size, 3);
+
+    // A frame matching the old (undercounted) total size must be rejected, not panic
+    // on a bitfield container slice that runs past the end of the payload.
+    assert!(schema.dissect_frame(&[0u8; 2]).is_none());
+
+    let decoded = schema.dissect_frame(&[0x0A, 0x34, 0x12]).unwrap();
+    assert_eq!(decoded[0].name, "a");
+    assert_eq!(decoded[0].value_f64, 10.0);
+    assert_eq!(decoded[1].name, "b");
+    assert_eq!(decoded[1].value_f64, 4.0);
+}
+
+#[test]
+fn test_bitfield_container_does_not_share_storage_unit_with_wider_type() {
+    let c_code = r#"
+        struct __attribute__((packed)) Overflow16 {
+            uint16_t first: 12;
+            uint16_t second: 8;
+            uint16_t third: 12;
+        };
+    "#;
+    let schema = PacketSchema::from_c_struct(c_code, Endian::Little).unwrap();
+    // first occupies bytes 0-1 (12 bits used), second needs 8 bits and cannot share
+    // that unit -> bytes 2-3, third cannot share the remaining 8 bits of second's
+    // unit -> bytes 4-5. Total 6 bytes.
+    assert_eq!(schema.total_size, 6);
+    assert!(schema.dissect_frame(&[0u8; 5]).is_none());
+    assert!(schema.dissect_frame(&[0u8; 6]).is_some());
+}
+
+#[test]
+fn test_trailing_partial_bitfield_container_occupies_full_storage_unit() {
+    let schema = PacketSchema::from_c_struct(
+        "struct __attribute__((packed)) Partial { uint16_t a: 4; };",
+        Endian::Little,
+    )
+    .unwrap();
+    // A u16 bitfield allocates a full 16-bit storage unit even when only 4 bits are used.
+    assert_eq!(schema.total_size, 2);
+}
+
+#[test]
+fn test_signed_64bit_bitfield_sign_extension() {
+    let schema = PacketSchema::from_c_struct(
+        "struct __attribute__((packed)) S64 { int64_t value: 64; };",
+        Endian::Little,
+    )
+    .unwrap();
+    assert_eq!(schema.total_size, 8);
+    let decoded = schema.dissect_frame(&(-1i64).to_le_bytes()).unwrap();
+    assert_eq!(decoded[0].name, "value");
+    assert_eq!(decoded[0].value_f64, -1.0);
+}
+
+#[test]
+fn test_huge_array_count_is_error_not_panic() {
+    // 2^62 elements of u32 overflows usize when computing the struct size; the parser
+    // must report an error instead of panicking on the multiply.
+    let result = PacketSchema::from_c_struct(
+        "struct Huge { uint32_t values[4611686018427387904]; };",
+        Endian::Little,
+    );
+    assert!(result.is_err());
+}
+
+#[test]
+fn test_long_long_and_unsigned_long_long_types() {
+    // The parser documents support for the `long long` aliases; consuming only one
+    // `long` would treat the second keyword as the field name and fail (or mis-layout).
+    let schema = PacketSchema::from_c_struct(
+        "struct Aliases { unsigned long long u64_value; long long i64_value; unsigned short u16_value; long i32_value; };",
+        Endian::Little,
+    )
+    .unwrap();
+    assert_eq!(schema.fields.len(), 4);
+    assert_eq!(schema.fields[0].ty, PrimitiveType::U64);
+    assert_eq!(schema.fields[1].ty, PrimitiveType::I64);
+    assert_eq!(schema.fields[2].ty, PrimitiveType::U16);
+    assert_eq!(schema.fields[3].ty, PrimitiveType::I32);
+    assert_eq!(schema.total_size, 8 + 8 + 2 + 4);
+}
+
+#[test]
+fn test_bitfield_then_scalar_reserves_full_storage_unit() {
+    // Reference layout from gcc (packed, x86_64-mingw32):
+    //   struct { uint16_t a:4; uint8_t b; } -> sizeof 3, `b` at byte offset 2.
+    // The previous implementation advanced only by the used bits (byte 1) and undercounted
+    // the struct size, so `b` was decoded from the wrong byte.
+    let schema = PacketSchema::from_c_struct(
+        "struct __attribute__((packed)) BitThenScalar { uint16_t a: 4; uint8_t b; };",
+        Endian::Little,
+    )
+    .unwrap();
+    assert_eq!(schema.total_size, 3);
+    assert_eq!(schema.fields[1].offset, 2);
+    assert!(schema.dissect_frame(&[0u8; 2]).is_none());
+
+    let decoded = schema.dissect_frame(&[0x0A, 0x00, 0x5A]).unwrap();
+    assert_eq!(decoded[0].value_f64, 10.0);
+    assert_eq!(decoded[1].value_f64, 0x5A as f64);
+}
+
+#[test]
+fn test_float_bitfield_is_rejected() {
+    // A C struct cannot declare a float bitfield; accepting it would build a schema that
+    // silently fails to dissect every frame.
+    let result = PacketSchema::from_c_struct("struct Bad { float ratio: 3; };", Endian::Little);
+    assert!(result.is_err());
 }
 
 proptest! {

@@ -12,6 +12,15 @@ pub const LINKTYPE_RAW: u16 = 101;
 pub const LINKTYPE_SLIP: u16 = 8;
 pub const TS_RESOL_NANO: u8 = 9; // 10^-9 ns timestamp resolution
 
+/// Upper bound on a single PCAPNG block we are willing to buffer. OmniPort serial frames
+/// are far smaller than this; the cap keeps a malformed or hostile capture from forcing a
+/// multi-gigabyte allocation before failing.
+pub const MAX_BLOCK_LEN: u32 = 16 * 1024 * 1024;
+
+/// Size of an Enhanced Packet Block body excluding the packet data and padding
+/// (InterfaceId, TsHigh, TsLow, CapLen, OrigLen).
+const EPB_FIXED_BODY_LEN: usize = 20;
+
 #[derive(Error, Debug)]
 pub enum PcapngError {
     #[error("I/O error: {0}")]
@@ -62,13 +71,15 @@ impl<W: Write> PcapngWriter<W> {
         }
 
         // 1. Build Section Header Block (SHB)
-        // Options: Option 4 (shb_userappl) = "OmniPort" (8 bytes), Option 0 (end of options)
+        // Option 3 (shb_userappl) = "OmniPort", padded to a 32-bit boundary, then
+        // Option 0 (end of options).
         let mut shb_options = Vec::new();
-        // Option 4: User Application
         let app_name = b"OmniPort";
-        shb_options.extend_from_slice(&4u16.to_le_bytes()); // opt_code
+        shb_options.extend_from_slice(&3u16.to_le_bytes()); // opt_code: shb_userappl
         shb_options.extend_from_slice(&(app_name.len() as u16).to_le_bytes()); // opt_len
         shb_options.extend_from_slice(app_name);
+        let app_pad = (4 - (app_name.len() % 4)) % 4;
+        shb_options.resize(shb_options.len() + app_pad, 0);
         // Option 0: End of options
         shb_options.extend_from_slice(&0u16.to_le_bytes());
         shb_options.extend_from_slice(&0u16.to_le_bytes());
@@ -216,6 +227,9 @@ impl<R: Read> PcapngReader<R> {
             if total_len < 12 {
                 return Err(PcapngError::InvalidBlockLength(total_len));
             }
+            if total_len > MAX_BLOCK_LEN {
+                return Err(PcapngError::InvalidBlockLength(total_len));
+            }
 
             let body_len = (total_len - 12) as usize;
             let mut body_and_trailer = vec![0u8; body_len + 4];
@@ -233,6 +247,10 @@ impl<R: Read> PcapngReader<R> {
             }
 
             if block_type == BLOCK_TYPE_EPB {
+                // The fixed header fields must fit in the block body.
+                if body_len < EPB_FIXED_BODY_LEN {
+                    return Err(PcapngError::InvalidBlockLength(total_len));
+                }
                 let if_id = u32::from_le_bytes(body_and_trailer[0..4].try_into().unwrap());
                 let ts_high = u32::from_le_bytes(body_and_trailer[4..8].try_into().unwrap());
                 let ts_low = u32::from_le_bytes(body_and_trailer[8..12].try_into().unwrap());
@@ -240,8 +258,13 @@ impl<R: Read> PcapngReader<R> {
                     u32::from_le_bytes(body_and_trailer[12..16].try_into().unwrap()) as usize;
                 let orig_len = u32::from_le_bytes(body_and_trailer[16..20].try_into().unwrap());
 
+                let payload_end = EPB_FIXED_BODY_LEN + cap_len;
+                if payload_end > body_len {
+                    return Err(PcapngError::InvalidBlockLength(total_len));
+                }
+
                 let timestamp_ns = ((ts_high as u64) << 32) | (ts_low as u64);
-                let payload = body_and_trailer[20..20 + cap_len].to_vec();
+                let payload = body_and_trailer[EPB_FIXED_BODY_LEN..payload_end].to_vec();
 
                 packets.push(ParsedPacket {
                     timestamp_ns,
@@ -258,6 +281,78 @@ impl<R: Read> PcapngReader<R> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn test_shb_userappl_option_uses_spec_option_code_3() {
+        let mut buf = Vec::new();
+        {
+            let mut writer = PcapngWriter::new(&mut buf);
+            writer.write_header("test_port").unwrap();
+            writer.flush().unwrap();
+        }
+
+        // SHB body starts after the 8-byte block header. Layout:
+        // ByteOrderMagic (4) + Major (2) + Minor (2) + SectionLength (8) + options.
+        let total_len = u32::from_le_bytes(buf[4..8].try_into().unwrap()) as usize;
+        let options = &buf[24..total_len - 4];
+        let opt_code = u16::from_le_bytes(options[0..2].try_into().unwrap());
+        let opt_len = u16::from_le_bytes(options[2..4].try_into().unwrap()) as usize;
+        // PCAPNG spec: shb_userappl option code is 3 (1 = shb_hardware, 2 = shb_os).
+        assert_eq!(opt_code, 3, "shb_userappl must use option code 3");
+        assert_eq!(&options[4..4 + opt_len], b"OmniPort");
+    }
+
+    fn block(block_type: u32, total_len: u32, body_and_trailer: &[u8]) -> Vec<u8> {
+        let mut bytes = Vec::new();
+        bytes.extend_from_slice(&block_type.to_le_bytes());
+        bytes.extend_from_slice(&total_len.to_le_bytes());
+        bytes.extend_from_slice(body_and_trailer);
+        bytes
+    }
+
+    #[test]
+    fn test_reader_rejects_truncated_epb_without_panicking() {
+        // EPB with total_len == 12 => zero body bytes. Parsing must report a malformed
+        // block instead of indexing past the body buffer.
+        let bytes = block(BLOCK_TYPE_EPB, 12, &12u32.to_le_bytes());
+        let mut reader = PcapngReader::new(bytes.as_slice());
+        let result = reader.read_all_packets();
+        assert!(matches!(result, Err(PcapngError::InvalidBlockLength(12))));
+    }
+
+    #[test]
+    fn test_reader_rejects_capture_len_overrun_without_panicking() {
+        // EPB whose captured length claims more payload bytes than the block contains.
+        let mut body = Vec::new();
+        body.extend_from_slice(&0u32.to_le_bytes()); // interface id
+        body.extend_from_slice(&0u32.to_le_bytes()); // ts high
+        body.extend_from_slice(&0u32.to_le_bytes()); // ts low
+        body.extend_from_slice(&1000u32.to_le_bytes()); // captured length (bogus)
+        body.extend_from_slice(&1000u32.to_le_bytes()); // original length
+        body.extend_from_slice(&32u32.to_le_bytes()); // trailer
+        let bytes = block(BLOCK_TYPE_EPB, 32, &body);
+        assert_eq!(bytes.len(), 32);
+
+        let mut reader = PcapngReader::new(bytes.as_slice());
+        let result = reader.read_all_packets();
+        assert!(
+            matches!(result, Err(PcapngError::InvalidBlockLength(32))),
+            "expected InvalidBlockLength, got {result:?}"
+        );
+    }
+
+    #[test]
+    fn test_reader_rejects_absurd_block_length_without_allocating() {
+        // A malformed block claiming a 20 MB total length must be rejected by the
+        // length sanity cap rather than allocating the full body buffer.
+        let bytes = block(BLOCK_TYPE_EPB, 20_000_000, &[]);
+        let mut reader = PcapngReader::new(bytes.as_slice());
+        let result = reader.read_all_packets();
+        assert!(
+            matches!(result, Err(PcapngError::InvalidBlockLength(20_000_000))),
+            "expected InvalidBlockLength, got {result:?}"
+        );
+    }
 
     #[test]
     fn test_pcapng_write_and_read_roundtrip() {
