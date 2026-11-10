@@ -3,5 +3,5 @@
 pub mod daemon;
 pub mod server;
 
-pub use daemon::{DaemonEngine, DaemonState, RouteEntry};
+pub use daemon::DaemonEngine;
 pub use server::run_server;

@@ -1,6 +1,6 @@
 use crate::fault::{FaultConfig, FaultInjector};
 use crate::{EndpointId, SerialEvent};
-use std::collections::{HashMap, VecDeque};
+use std::collections::VecDeque;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex, RwLock};
 use std::time::Duration;
@@ -127,11 +127,116 @@ pub struct EdgeEntry {
     pub fault_injector: Option<Arc<Mutex<FaultInjector>>>,
 }
 
+/// Fixed-fanout persistent radix trie node over `u16` endpoint identifiers.
+#[derive(Clone)]
+struct Node16<T>([Option<T>; 16]);
+
+impl<T> Default for Node16<T> {
+    fn default() -> Self {
+        Self([const { None }; 16])
+    }
+}
+
+impl<T> Node16<T> {
+    fn is_empty(&self) -> bool {
+        self.0.iter().all(Option::is_none)
+    }
+}
+
+type Leaf16<V> = Node16<V>;
+type Branch1<V> = Node16<Arc<Leaf16<V>>>;
+type Branch2<V> = Node16<Arc<Branch1<V>>>;
+type Branch3<V> = Node16<Arc<Branch2<V>>>;
+
+#[inline]
+fn nibbles(key: u16) -> [usize; 4] {
+    [
+        ((key >> 12) & 0xf) as usize,
+        ((key >> 8) & 0xf) as usize,
+        ((key >> 4) & 0xf) as usize,
+        (key & 0xf) as usize,
+    ]
+}
+
+/// Persistent 4-level radix map keyed by `u16`, making RCU copy-on-write
+/// updates O(1) instead of cloning the whole table on every mutation.
+#[derive(Clone)]
+struct TrieMap<V> {
+    root: Arc<Branch3<V>>,
+}
+
+impl<V> Default for TrieMap<V> {
+    fn default() -> Self {
+        Self {
+            root: Arc::new(Node16::default()),
+        }
+    }
+}
+
+impl<V: Clone> TrieMap<V> {
+    fn get(&self, key: u16) -> Option<&V> {
+        let [i3, i2, i1, i0] = nibbles(key);
+        self.root.0[i3].as_ref()?.0[i2].as_ref()?.0[i1].as_ref()?.0[i0].as_ref()
+    }
+
+    fn contains_key(&self, key: u16) -> bool {
+        self.get(key).is_some()
+    }
+
+    fn insert(&mut self, key: u16, value: V) {
+        let [i3, i2, i1, i0] = nibbles(key);
+        let l3 = Arc::make_mut(&mut self.root);
+        let l2 = Arc::make_mut(l3.0[i3].get_or_insert_with(Default::default));
+        let l1 = Arc::make_mut(l2.0[i2].get_or_insert_with(Default::default));
+        let l0 = Arc::make_mut(l1.0[i1].get_or_insert_with(Default::default));
+        l0.0[i0] = Some(value);
+    }
+
+    fn remove(&mut self, key: u16) -> Option<V> {
+        if !self.contains_key(key) {
+            return None;
+        }
+        let [i3, i2, i1, i0] = nibbles(key);
+        let l3 = Arc::make_mut(&mut self.root);
+        let l2 = Arc::make_mut(l3.0[i3].as_mut()?);
+        let l1 = Arc::make_mut(l2.0[i2].as_mut()?);
+        let l0 = Arc::make_mut(l1.0[i1].as_mut()?);
+        let removed = l0.0[i0].take();
+        if l0.is_empty() {
+            l1.0[i1] = None;
+            if l1.is_empty() {
+                l2.0[i2] = None;
+                if l2.is_empty() {
+                    l3.0[i3] = None;
+                }
+            }
+        }
+        removed
+    }
+
+    fn visit(&self, mut f: impl FnMut(u16, &V)) {
+        for (i3, b2) in self.root.0.iter().enumerate() {
+            let Some(b2) = b2 else { continue };
+            for (i2, b1) in b2.0.iter().enumerate() {
+                let Some(b1) = b1 else { continue };
+                for (i1, b0) in b1.0.iter().enumerate() {
+                    let Some(b0) = b0 else { continue };
+                    for (i0, val) in b0.0.iter().enumerate() {
+                        let Some(val) = val else { continue };
+                        let key = ((i3 << 12) | (i2 << 8) | (i1 << 4) | i0) as u16;
+                        f(key, val);
+                    }
+                }
+            }
+        }
+    }
+}
+
 /// Read-Copy-Update snapshot table for lock-free routing lookups
 #[derive(Default, Clone)]
 pub struct RoutingTable {
-    pub endpoints: HashMap<EndpointId, Arc<BoundedEventQueue>>,
-    pub routes: HashMap<EndpointId, Vec<EdgeEntry>>,
+    endpoints: TrieMap<Arc<BoundedEventQueue>>,
+    routes: TrieMap<Arc<Vec<EdgeEntry>>>,
 }
 
 /// Lock-free high-speed routing graph supporting 1:1, 1:N splitting, and N:1 atomic merging
@@ -161,7 +266,7 @@ impl RoutingGraph {
     ) -> Result<(), RoutingError> {
         let mut guard = self.table.write().unwrap_or_else(|e| e.into_inner());
         let mut new_table = (**guard).clone();
-        if new_table.endpoints.contains_key(&id) {
+        if new_table.endpoints.contains_key(id) {
             return Err(RoutingError::EndpointAlreadyRegistered(id));
         }
         new_table
@@ -176,18 +281,30 @@ impl RoutingGraph {
         let mut guard = self.table.write().unwrap_or_else(|e| e.into_inner());
         let mut new_table = (**guard).clone();
 
-        if let Some(queue) = new_table.endpoints.remove(&id) {
+        if let Some(queue) = new_table.endpoints.remove(id) {
             queue.close();
         } else {
             return Err(RoutingError::EndpointNotFound(id));
         }
 
         // Remove outgoing edges
-        new_table.routes.remove(&id);
+        new_table.routes.remove(id);
 
         // Remove incoming edges from other endpoints
-        for edges in new_table.routes.values_mut() {
-            edges.retain(|e| e.target != id);
+        let mut affected = Vec::new();
+        new_table.routes.visit(|src_id, edges| {
+            if edges.iter().any(|e| e.target == id) {
+                let retained: Vec<EdgeEntry> =
+                    edges.iter().filter(|e| e.target != id).cloned().collect();
+                affected.push((src_id, retained));
+            }
+        });
+        for (src_id, retained) in affected {
+            if retained.is_empty() {
+                new_table.routes.remove(src_id);
+            } else {
+                new_table.routes.insert(src_id, Arc::new(retained));
+            }
         }
 
         *guard = Arc::new(new_table);
@@ -196,7 +313,7 @@ impl RoutingGraph {
 
     pub fn has_endpoint(&self, id: EndpointId) -> bool {
         let guard = self.table.read().unwrap_or_else(|e| e.into_inner());
-        guard.endpoints.contains_key(&id)
+        guard.endpoints.contains_key(id)
     }
 
     /// Connects a directed edge from `from` endpoint to `to` endpoint with optional fault injection
@@ -209,14 +326,18 @@ impl RoutingGraph {
         let mut guard = self.table.write().unwrap_or_else(|e| e.into_inner());
         let mut new_table = (**guard).clone();
 
-        if !new_table.endpoints.contains_key(&from) {
+        if !new_table.endpoints.contains_key(from) {
             return Err(RoutingError::EndpointNotFound(from));
         }
-        if !new_table.endpoints.contains_key(&to) {
+        if !new_table.endpoints.contains_key(to) {
             return Err(RoutingError::EndpointNotFound(to));
         }
 
-        let edges = new_table.routes.entry(from).or_default();
+        let mut edges = new_table
+            .routes
+            .get(from)
+            .map(|arc| (**arc).clone())
+            .unwrap_or_default();
         if edges.iter().any(|e| e.target == to) {
             return Err(RoutingError::EdgeAlreadyExists(from, to));
         }
@@ -226,6 +347,7 @@ impl RoutingGraph {
             target: to,
             fault_injector: injector,
         });
+        new_table.routes.insert(from, Arc::new(edges));
 
         *guard = Arc::new(new_table);
         Ok(())
@@ -236,14 +358,20 @@ impl RoutingGraph {
         let mut guard = self.table.write().unwrap_or_else(|e| e.into_inner());
         let mut new_table = (**guard).clone();
 
-        if let Some(edges) = new_table.routes.get_mut(&from) {
-            let initial_len = edges.len();
-            edges.retain(|e| e.target != to);
-            if edges.len() == initial_len {
-                return Err(RoutingError::EdgeNotFound(from, to));
-            }
-        } else {
+        let Some(existing) = new_table.routes.get(from) else {
             return Err(RoutingError::EdgeNotFound(from, to));
+        };
+        let mut edges = (**existing).clone();
+        let initial_len = edges.len();
+        edges.retain(|e| e.target != to);
+        if edges.len() == initial_len {
+            return Err(RoutingError::EdgeNotFound(from, to));
+        }
+
+        if edges.is_empty() {
+            new_table.routes.remove(from);
+        } else {
+            new_table.routes.insert(from, Arc::new(edges));
         }
 
         *guard = Arc::new(new_table);
@@ -259,7 +387,7 @@ impl RoutingGraph {
             Arc::clone(&guard)
         };
 
-        let edges = match snapshot.routes.get(&event.source_id) {
+        let edges = match snapshot.routes.get(event.source_id) {
             Some(edges) => edges,
             None => return Ok(0),
         };
@@ -267,8 +395,8 @@ impl RoutingGraph {
         let now_ns = event.timestamp_ns;
         let mut dispatched = 0;
 
-        for edge in edges {
-            let dest_queue = match snapshot.endpoints.get(&edge.target) {
+        for edge in edges.iter() {
+            let dest_queue = match snapshot.endpoints.get(edge.target) {
                 Some(q) => q,
                 None => continue,
             };
@@ -321,7 +449,7 @@ impl RoutingGraph {
             Arc::clone(
                 guard
                     .endpoints
-                    .get(&endpoint_id)
+                    .get(endpoint_id)
                     .ok_or(RoutingError::EndpointNotFound(endpoint_id))?,
             )
         };
@@ -335,7 +463,7 @@ impl RoutingGraph {
             Arc::clone(
                 guard
                     .endpoints
-                    .get(&endpoint_id)
+                    .get(endpoint_id)
                     .ok_or(RoutingError::EndpointNotFound(endpoint_id))?,
             )
         };
@@ -347,7 +475,7 @@ impl RoutingGraph {
         let guard = self.table.read().unwrap_or_else(|e| e.into_inner());
         let queue = guard
             .endpoints
-            .get(&endpoint_id)
+            .get(endpoint_id)
             .ok_or(RoutingError::EndpointNotFound(endpoint_id))?;
         Ok(queue.len())
     }

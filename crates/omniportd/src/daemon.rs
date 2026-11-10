@@ -1,7 +1,10 @@
 use omniport_capture::MmapCaptureEngine;
 use omniport_core::SerialEvent;
+use omniport_core::routing::RoutingGraph;
+use omniport_core::topology::{
+    Request as TopologyRequest, Response as TopologyResponse, Topology, TopologyError,
+};
 use omniport_proto::{EndpointInfo, Request, Response};
-use std::collections::HashMap;
 use std::path::Path;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -17,39 +20,10 @@ struct DaemonCapture {
     _dir: Option<tempfile::TempDir>,
 }
 
-#[derive(Debug, Clone)]
-pub struct RouteEntry {
-    pub route_id: u32,
-    pub source_id: u16,
-    pub target_ids: Vec<u16>,
-    pub bidirectional: bool,
-}
-
-#[derive(Debug)]
-pub struct DaemonState {
-    pub start_time: Instant,
-    pub endpoints: HashMap<u16, EndpointInfo>,
-    pub routes: HashMap<u32, RouteEntry>,
-    pub next_endpoint_id: u16,
-    pub next_route_id: u32,
-    pub next_pair_id: u32,
-}
-
-impl Default for DaemonState {
-    fn default() -> Self {
-        Self {
-            start_time: Instant::now(),
-            endpoints: HashMap::new(),
-            routes: HashMap::new(),
-            next_endpoint_id: 1,
-            next_route_id: 100,
-            next_pair_id: 1,
-        }
-    }
-}
-
 pub struct DaemonEngine {
-    pub state: Arc<Mutex<DaemonState>>,
+    start_time: Instant,
+    topology: Mutex<Topology>,
+    graph: Arc<RoutingGraph>,
     capture: RwLock<DaemonCapture>,
     pub shutdown_tx: broadcast::Sender<()>,
     pub is_shutting_down: Arc<AtomicBool>,
@@ -88,12 +62,21 @@ impl DaemonEngine {
 
     fn from_capture(capture: DaemonCapture) -> Self {
         let (shutdown_tx, _) = broadcast::channel(4);
+        let topology = Topology::new();
+        let graph = topology.graph();
         Self {
-            state: Arc::new(Mutex::new(DaemonState::default())),
+            start_time: Instant::now(),
+            topology: Mutex::new(topology),
+            graph,
             capture: RwLock::new(capture),
             shutdown_tx,
             is_shutting_down: Arc::new(AtomicBool::new(false)),
         }
+    }
+
+    /// Returns the live `RoutingGraph` synchronized by the daemon's [`Topology`].
+    pub fn routing_graph(&self) -> &Arc<RoutingGraph> {
+        &self.graph
     }
 
     /// Appends a captured serial frame to the daemon's dual-mmap store.
@@ -125,202 +108,15 @@ impl DaemonEngine {
                     .engine
                     .read_viewport_batch(start_row, row_count as usize)
                     .encode_to_vec();
-                return Response::viewport_batch(bytes);
+                Response::viewport_batch(bytes)
             }
             Request::CaptureStatus => {
                 let capture = self.capture.read().await;
-                return Response::CaptureStatus {
+                Response::CaptureStatus {
                     total_packets: capture.engine.packet_count(),
                     dropped_frames: capture.engine.dropped_frames(),
-                };
-            }
-            _ => {}
-        }
-
-        let mut state = self.state.lock().await;
-
-        match req {
-            Request::HealthCheck => {
-                let uptime_secs = state.start_time.elapsed().as_secs();
-                let active_endpoints = state.endpoints.len() as u32;
-                let active_routes = state.routes.len() as u32;
-                Response::Health {
-                    status: "RUNNING".to_string(),
-                    uptime_secs,
-                    active_endpoints,
-                    active_routes,
                 }
             }
-
-            Request::ListEndpoints => {
-                let list: Vec<EndpointInfo> = state.endpoints.values().cloned().collect();
-                Response::Endpoints(list)
-            }
-
-            Request::CreateVirtualPair {
-                port_a,
-                port_b,
-                config,
-            } => {
-                // A u16 endpoint id space is only 65535 wide: reject instead of
-                // overflowing (debug panic / release wrap) after enough pairs.
-                let id_a = state.next_endpoint_id;
-                let Some(id_b) = id_a.checked_add(1) else {
-                    return Response::Error {
-                        code: 503,
-                        message: "endpoint id space exhausted".to_string(),
-                    };
-                };
-                let Some(next_endpoint_id) = id_b.checked_add(1) else {
-                    return Response::Error {
-                        code: 503,
-                        message: "endpoint id space exhausted".to_string(),
-                    };
-                };
-                let Some(next_pair_id) = state.next_pair_id.checked_add(1) else {
-                    return Response::Error {
-                        code: 503,
-                        message: "virtual pair id space exhausted".to_string(),
-                    };
-                };
-                let Some(next_route_id) = state.next_route_id.checked_add(1) else {
-                    return Response::Error {
-                        code: 503,
-                        message: "route id space exhausted".to_string(),
-                    };
-                };
-
-                let pair_id = state.next_pair_id;
-                state.next_pair_id = next_pair_id;
-                state.next_endpoint_id = next_endpoint_id;
-
-                state.endpoints.insert(
-                    id_a,
-                    EndpointInfo {
-                        id: id_a,
-                        name: port_a.clone(),
-                        port_type: "VirtualPairSideA".to_string(),
-                        baud_rate: config.baud_rate,
-                        is_active: true,
-                    },
-                );
-
-                state.endpoints.insert(
-                    id_b,
-                    EndpointInfo {
-                        id: id_b,
-                        name: port_b.clone(),
-                        port_type: "VirtualPairSideB".to_string(),
-                        baud_rate: config.baud_rate,
-                        is_active: true,
-                    },
-                );
-
-                // Add default bidirectional 1:1 route between the pair
-                let route_id = state.next_route_id;
-                state.next_route_id = next_route_id;
-                state.routes.insert(
-                    route_id,
-                    RouteEntry {
-                        route_id,
-                        source_id: id_a,
-                        target_ids: vec![id_b],
-                        bidirectional: true,
-                    },
-                );
-
-                Response::VirtualPairCreated {
-                    pair_id,
-                    port_a,
-                    port_b,
-                    success: true,
-                    message: format!("Virtual pair allocated (endpoints {} <-> {})", id_a, id_b),
-                }
-            }
-
-            Request::RemoveEndpoint { id } => {
-                if state.endpoints.remove(&id).is_some() {
-                    // Remove connected routes
-                    state
-                        .routes
-                        .retain(|_, r| r.source_id != id && !r.target_ids.contains(&id));
-                    Response::Success {
-                        message: format!("Endpoint {} removed successfully", id),
-                    }
-                } else {
-                    Response::Error {
-                        code: 404,
-                        message: format!("Endpoint {} not found", id),
-                    }
-                }
-            }
-
-            Request::AddRoute {
-                source_id,
-                target_ids,
-                bidirectional,
-            } => {
-                // A route referencing nonexistent endpoints could never deliver
-                // frames; report that instead of claiming success.
-                if !state.endpoints.contains_key(&source_id) {
-                    return Response::Error {
-                        code: 404,
-                        message: format!("Endpoint {} not found", source_id),
-                    };
-                }
-                if target_ids.is_empty() {
-                    return Response::Error {
-                        code: 400,
-                        message: "AddRoute requires at least one target endpoint".to_string(),
-                    };
-                }
-                if let Some(missing) = target_ids
-                    .iter()
-                    .find(|id| !state.endpoints.contains_key(id))
-                {
-                    return Response::Error {
-                        code: 404,
-                        message: format!("Endpoint {} not found", missing),
-                    };
-                }
-
-                let Some(next_route_id) = state.next_route_id.checked_add(1) else {
-                    return Response::Error {
-                        code: 503,
-                        message: "route id space exhausted".to_string(),
-                    };
-                };
-                let route_id = state.next_route_id;
-                state.next_route_id = next_route_id;
-                state.routes.insert(
-                    route_id,
-                    RouteEntry {
-                        route_id,
-                        source_id,
-                        target_ids,
-                        bidirectional,
-                    },
-                );
-                Response::RouteAdded {
-                    route_id,
-                    success: true,
-                    message: format!("Route {} established", route_id),
-                }
-            }
-
-            Request::RemoveRoute { route_id } => {
-                if state.routes.remove(&route_id).is_some() {
-                    Response::Success {
-                        message: format!("Route {} removed successfully", route_id),
-                    }
-                } else {
-                    Response::Error {
-                        code: 404,
-                        message: format!("Route {} not found", route_id),
-                    }
-                }
-            }
-
             Request::Shutdown => {
                 self.is_shutting_down.store(true, Ordering::SeqCst);
                 let _ = self.shutdown_tx.send(());
@@ -328,16 +124,104 @@ impl DaemonEngine {
                     message: "omniportd shutdown initiated".to_string(),
                 }
             }
-            Request::ReadViewport { .. } | Request::CaptureStatus => {
-                unreachable!("capture queries are handled before locking daemon state")
+            Request::HealthCheck => {
+                let (active_endpoints, active_routes) = self.topology.lock().await.counts();
+                Response::Health {
+                    status: "RUNNING".to_string(),
+                    uptime_secs: self.start_time.elapsed().as_secs(),
+                    active_endpoints: active_endpoints as u32,
+                    active_routes: active_routes as u32,
+                }
+            }
+            topo_req => {
+                let mapped = match topo_req {
+                    Request::ListEndpoints => TopologyRequest::ListEndpoints,
+                    Request::GetTopology => TopologyRequest::Snapshot,
+                    Request::CreateVirtualPair {
+                        port_a,
+                        port_b,
+                        config,
+                    } => TopologyRequest::CreateVirtualPair {
+                        port_a,
+                        port_b,
+                        config,
+                    },
+                    Request::RemoveEndpoint { id } => TopologyRequest::RemoveEndpoint { id },
+                    Request::AddRoute {
+                        source_id,
+                        target_ids,
+                        bidirectional,
+                        fault,
+                    } => TopologyRequest::AddRoute {
+                        source_id,
+                        target_ids,
+                        bidirectional,
+                        fault,
+                    },
+                    Request::RemoveRoute { route_id } => TopologyRequest::RemoveRoute { route_id },
+                    Request::HealthCheck
+                    | Request::ReadViewport { .. }
+                    | Request::CaptureStatus
+                    | Request::Shutdown => unreachable!(),
+                };
+
+                let result = self.topology.lock().await.apply(mapped);
+                map_topology_result(result)
             }
         }
+    }
+}
+
+fn map_topology_result(result: Result<TopologyResponse, TopologyError>) -> Response {
+    match result {
+        Ok(TopologyResponse::Endpoints(eps)) => {
+            Response::Endpoints(eps.into_iter().map(EndpointInfo::from).collect())
+        }
+        Ok(TopologyResponse::Snapshot(snapshot)) => Response::Topology {
+            endpoints: snapshot
+                .endpoints
+                .into_iter()
+                .map(EndpointInfo::from)
+                .collect(),
+            routes: snapshot.routes,
+        },
+        Ok(TopologyResponse::VirtualPairCreated {
+            pair_id,
+            endpoint_a,
+            endpoint_b,
+            ..
+        }) => Response::VirtualPairCreated {
+            pair_id,
+            port_a: endpoint_a.name,
+            port_b: endpoint_b.name,
+            success: true,
+            message: format!(
+                "Virtual pair allocated (endpoints {} <-> {})",
+                endpoint_a.id, endpoint_b.id
+            ),
+        },
+        Ok(TopologyResponse::RouteAdded(route)) => Response::RouteAdded {
+            route_id: route.route_id,
+            success: true,
+            message: format!("Route {} established", route.route_id),
+        },
+        Ok(TopologyResponse::Removed { message }) => Response::Success { message },
+        Ok(other) => Response::Error {
+            code: 500,
+            message: format!("unexpected topology response: {other:?}"),
+        },
+        Err(err) => Response::Error {
+            code: err.status_code(),
+            message: err.to_string(),
+        },
     }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use bytes::Bytes;
+    use omniport_core::{FrameFlags, PinState};
     use omniport_proto::SerialConfigDto;
 
     fn pair_request(a: &str, b: &str) -> Request {
@@ -378,8 +262,17 @@ mod tests {
         }
 
         // No endpoint may have been registered for the rejected pair.
-        let state = engine.state.lock().await;
-        assert_eq!(state.endpoints.len(), 32_767 * 2);
+        match engine.handle_request(Request::HealthCheck).await {
+            Response::Health {
+                active_endpoints,
+                active_routes,
+                ..
+            } => {
+                assert_eq!(active_endpoints, 32_767 * 2);
+                assert_eq!(active_routes, 32_767);
+            }
+            other => panic!("expected Health response, got {other:?}"),
+        }
     }
 
     #[tokio::test]
@@ -393,6 +286,7 @@ mod tests {
         for req in [
             Request::HealthCheck,
             Request::ListEndpoints,
+            Request::GetTopology,
             Request::CaptureStatus,
             Request::ReadViewport {
                 start_row: 0,
@@ -420,6 +314,7 @@ mod tests {
                 source_id: 999,
                 target_ids: vec![2],
                 bidirectional: false,
+                fault: None,
             })
             .await;
         match resp {
@@ -437,6 +332,7 @@ mod tests {
                 source_id: 1,
                 target_ids: vec![2, 4242],
                 bidirectional: false,
+                fault: None,
             })
             .await;
         match resp {
@@ -453,18 +349,31 @@ mod tests {
                 source_id: 1,
                 target_ids: vec![],
                 bidirectional: false,
+                fault: None,
             })
             .await;
         assert!(matches!(resp, Response::Error { code: 400, .. }));
 
-        // A valid route is still accepted.
+        // A valid route is still accepted and reflected in the live RoutingGraph.
         let resp = engine
             .handle_request(Request::AddRoute {
                 source_id: 1,
                 target_ids: vec![2],
                 bidirectional: true,
+                fault: None,
             })
             .await;
         assert!(matches!(resp, Response::RouteAdded { success: true, .. }));
+
+        let evt = SerialEvent {
+            timestamp_ns: 1_000,
+            source_id: 1,
+            flags: FrameFlags::DIR_TX,
+            pins: PinState::empty(),
+            payload: Bytes::from_static(b"TOPO_SYNC"),
+        };
+        assert_eq!(engine.routing_graph().route(evt).unwrap(), 1);
+        let delivered = engine.routing_graph().recv(2).await.unwrap();
+        assert_eq!(&delivered.payload[..], b"TOPO_SYNC");
     }
 }

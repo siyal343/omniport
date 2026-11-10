@@ -441,3 +441,91 @@ steps:
     assert_eq!(report.failed_steps, 1);
     assert!(report.error.unwrap().contains("Timed out"));
 }
+
+#[test]
+fn test_scenario_rejects_route_referencing_undeclared_endpoint_or_self_loop() {
+    let missing_target_yaml = r#"
+version: "1.0"
+name: "Missing Route Endpoint"
+endpoints:
+  - id: 1
+    name: "sender"
+    type: "mock"
+routes:
+  - source: 1
+    targets: [99]
+"#;
+    let err = match ScenarioRunner::from_yaml(missing_target_yaml) {
+        Ok(_) => panic!("route targeting missing endpoint must fail"),
+        Err(e) => e,
+    };
+    assert!(
+        err.to_string().contains("99"),
+        "error should name missing endpoint: {err}"
+    );
+
+    let self_loop_yaml = r#"
+version: "1.0"
+name: "Self Loop Route"
+endpoints:
+  - id: 1
+    name: "sender"
+    type: "mock"
+routes:
+  - source: 1
+    targets: [1]
+"#;
+    let err = match ScenarioRunner::from_yaml(self_loop_yaml) {
+        Ok(_) => panic!("self-loop route must fail"),
+        Err(e) => e,
+    };
+    assert!(
+        err.to_string().contains("1"),
+        "error should explain self-loop: {err}"
+    );
+}
+
+#[tokio::test]
+async fn test_scenario_fanout_bidirectional_route_via_topology() {
+    let yaml = r#"
+version: "1.0"
+name: "Fanout Bidi"
+endpoints:
+  - id: 1
+    name: "hub"
+    type: "mock"
+  - id: 2
+    name: "leaf_a"
+    type: "mock"
+  - id: 3
+    name: "leaf_b"
+    type: "mock"
+routes:
+  - source: 1
+    targets: [2, 3]
+    bidirectional: true
+steps:
+  - action: "send"
+    endpoint: 1
+    payload_text: "BROADCAST"
+  - action: "expect"
+    endpoint: 2
+    timeout_ms: 200
+    match_text: "BROADCAST"
+  - action: "expect"
+    endpoint: 3
+    timeout_ms: 200
+    match_text: "BROADCAST"
+  - action: "send"
+    endpoint: 3
+    payload_text: "REPLY_FROM_B"
+  - action: "expect"
+    endpoint: 1
+    timeout_ms: 200
+    match_text: "REPLY_FROM_B"
+"#;
+    let mut runner = ScenarioRunner::from_yaml(yaml).expect("scenario should parse");
+    let report = runner.run().await;
+    assert!(report.success, "scenario should pass: {:?}", report.error);
+    assert_eq!(report.passed_steps, 5);
+}

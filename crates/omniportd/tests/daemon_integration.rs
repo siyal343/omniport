@@ -51,17 +51,25 @@ async fn test_daemon_client_rpc_roundtrip() {
     assert!(eps.iter().any(|e| e.name == "COM40"));
     assert!(eps.iter().any(|e| e.name == "COM41"));
 
-    // 4. Add route
+    // 4. Add route & verify atomic topology snapshot
     let route_id = client.add_route(1, vec![2], true).await.unwrap();
     assert_eq!(route_id, 101); // 100 was default 1:1 route for the pair
+
+    let (topo_eps, topo_routes) = client.topology().await.unwrap();
+    assert_eq!(topo_eps.len(), 2);
+    assert_eq!(topo_routes.len(), 2);
+    assert!(topo_routes.iter().any(|r| r.route_id == 100));
+    assert!(topo_routes.iter().any(|r| r.route_id == route_id));
 
     // 5. Remove route
     client.remove_route(route_id).await.unwrap();
 
-    // 6. Remove endpoint
+    // 6. Remove endpoint (and confirm default route 100 is pruned too)
     client.remove_endpoint(1).await.unwrap();
     let eps_after = client.list_endpoints().await.unwrap();
     assert_eq!(eps_after.len(), 1);
+    let (_eps_after_topo, routes_after) = client.topology().await.unwrap();
+    assert!(routes_after.is_empty());
 
     // 7. Capture viewport & status roundtrip
     engine

@@ -20,6 +20,9 @@ pub enum ScenarioError {
     #[error("Routing error: {0}")]
     RoutingError(#[from] omniport_core::routing::RoutingError),
 
+    #[error("Topology error: {0}")]
+    TopologyError(#[from] omniport_core::topology::TopologyError),
+
     #[error("Script error: {0}")]
     ScriptError(String),
 }

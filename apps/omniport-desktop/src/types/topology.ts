@@ -6,6 +6,7 @@
 export type EndpointKind = "uart" | "pty" | "virtual_pair" | "tcp" | "udp";
 
 export interface EndpointNodeData extends Record<string, unknown> {
+  endpointId?: number;
   label: string;
   kind: EndpointKind;
   portPath: string;
@@ -60,13 +61,60 @@ export interface DissectorNodeData extends Record<string, unknown> {
 }
 
 export interface RouteEdgeData extends Record<string, unknown> {
+  routeId?: number;
   sourceEndpointId: number;
   targetEndpointId: number;
+  bidirectional?: boolean;
   faultConfig?: FaultConfig;
   packetRate: number; // packets/second
   bandwidthBps: number;
   hasErrors: boolean;
   active: boolean;
+}
+
+/** Canonical wire shapes matching `omniport_core::topology` / `omniport_proto`. */
+export interface WireDuration {
+  secs: number;
+  nanos: number;
+}
+
+export interface WireGilbertElliott {
+  p_gb: number;
+  p_bg: number;
+  p_g: number;
+  p_b: number;
+}
+
+export interface WireFaultConfig {
+  fixed_delay: WireDuration;
+  jitter_mean: WireDuration;
+  jitter_std_dev: WireDuration;
+  rate_limit_bps?: number | null;
+  disconnected: boolean;
+  bit_error_rate: number;
+  gilbert_elliott?: WireGilbertElliott | null;
+  corrupt_nth_crc?: number | null;
+}
+
+export interface CanonicalEndpoint {
+  id: number;
+  name: string;
+  port_type: string;
+  baud_rate: number;
+  is_active: boolean;
+}
+
+export interface CanonicalRoute {
+  route_id: number;
+  source_id: number;
+  target_ids: number[];
+  bidirectional: boolean;
+  fault?: WireFaultConfig | null;
+}
+
+export interface CanonicalTopologySnapshot {
+  endpoints: CanonicalEndpoint[];
+  routes: CanonicalRoute[];
 }
 
 export interface TelemetrySeriesPoint {

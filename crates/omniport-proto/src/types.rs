@@ -1,5 +1,8 @@
 use omniport_core::SerialConfig;
+use omniport_core::fault::FaultConfig;
 use serde::{Deserialize, Serialize};
+
+pub use omniport_core::topology::Route;
 
 /// Maximum raw size of one ICD §2 viewport batch sent over the control plane.
 ///
@@ -9,47 +12,8 @@ use serde::{Deserialize, Serialize};
 /// instead of failing later inside the codec with a less actionable error.
 pub const MAX_VIEWPORT_BATCH_BYTES: usize = 8 * 1024 * 1024;
 
-/// Serializable serial configuration DTO
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
-pub struct SerialConfigDto {
-    pub baud_rate: u32,
-    pub data_bits: u8,
-    pub stop_bits: u8,
-    pub parity: u8,
-}
-
-impl From<SerialConfig> for SerialConfigDto {
-    fn from(c: SerialConfig) -> Self {
-        Self {
-            baud_rate: c.baud_rate,
-            data_bits: c.data_bits,
-            stop_bits: c.stop_bits,
-            parity: c.parity,
-        }
-    }
-}
-
-impl From<SerialConfigDto> for SerialConfig {
-    fn from(dto: SerialConfigDto) -> Self {
-        Self {
-            baud_rate: dto.baud_rate,
-            data_bits: dto.data_bits,
-            stop_bits: dto.stop_bits,
-            parity: dto.parity,
-        }
-    }
-}
-
-impl Default for SerialConfigDto {
-    fn default() -> Self {
-        Self {
-            baud_rate: 115_200,
-            data_bits: 8,
-            stop_bits: 1,
-            parity: 0,
-        }
-    }
-}
+/// Serializable serial configuration DTO (identical to [`omniport_core::SerialConfig`]).
+pub type SerialConfigDto = SerialConfig;
 
 /// Information describing an active serial or virtual endpoint
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -61,11 +25,24 @@ pub struct EndpointInfo {
     pub is_active: bool,
 }
 
+impl From<omniport_core::topology::EndpointInfo> for EndpointInfo {
+    fn from(ep: omniport_core::topology::EndpointInfo) -> Self {
+        Self {
+            id: ep.id,
+            name: ep.name,
+            port_type: ep.port_type,
+            baud_rate: ep.config.baud_rate,
+            is_active: ep.is_active,
+        }
+    }
+}
+
 /// Control-plane request message from client to daemon
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub enum Request {
     HealthCheck,
     ListEndpoints,
+    GetTopology,
     CreateVirtualPair {
         port_a: String,
         port_b: String,
@@ -78,6 +55,8 @@ pub enum Request {
         source_id: u16,
         target_ids: Vec<u16>,
         bidirectional: bool,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        fault: Option<FaultConfig>,
     },
     RemoveRoute {
         route_id: u32,
@@ -91,7 +70,7 @@ pub enum Request {
 }
 
 /// Control-plane response message from daemon to client
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub enum Response {
     Health {
         status: String,
@@ -100,6 +79,10 @@ pub enum Response {
         active_routes: u32,
     },
     Endpoints(Vec<EndpointInfo>),
+    Topology {
+        endpoints: Vec<EndpointInfo>,
+        routes: Vec<Route>,
+    },
     VirtualPairCreated {
         pair_id: u32,
         port_a: String,

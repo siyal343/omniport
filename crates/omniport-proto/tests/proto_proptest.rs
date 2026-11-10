@@ -1,8 +1,11 @@
+use omniport_core::fault::FaultConfig;
 use omniport_proto::codec::{read_message, write_message};
 use omniport_proto::{
-    MAX_FRAME_SIZE, MAX_VIEWPORT_BATCH_BYTES, ProtoError, Request, Response, SerialConfigDto,
+    EndpointInfo, MAX_FRAME_SIZE, MAX_VIEWPORT_BATCH_BYTES, ProtoError, Request, Response, Route,
+    SerialConfigDto,
 };
 use proptest::prelude::*;
+use std::time::Duration;
 
 proptest! {
     #![proptest_config(ProptestConfig { failure_persistence: None, ..ProptestConfig::default() })]
@@ -140,6 +143,53 @@ fn test_viewport_batch_budget_fits_the_json_frame_limit() {
     assert!(
         worst_case < MAX_FRAME_SIZE,
         "base64 worst case {worst_case} does not fit MAX_FRAME_SIZE {MAX_FRAME_SIZE}"
+    );
+}
+
+#[tokio::test]
+async fn test_get_topology_and_add_route_codec_roundtrip() {
+    let (mut client, mut server) = tokio::io::duplex(65536);
+
+    // JSON written without the optional `fault` field still decodes.
+    let legacy_json = r#"{"AddRoute":{"source_id":1,"target_ids":[2,3],"bidirectional":true}}"#;
+    let legacy_req: Request = serde_json::from_str(legacy_json).unwrap();
+    assert_eq!(
+        legacy_req,
+        Request::AddRoute {
+            source_id: 1,
+            target_ids: vec![2, 3],
+            bidirectional: true,
+            fault: None,
+        }
+    );
+
+    let req = Request::GetTopology;
+    write_message(&mut client, &req).await.unwrap();
+    assert_eq!(read_message::<_, Request>(&mut server).await.unwrap(), req);
+
+    let resp = Response::Topology {
+        endpoints: vec![EndpointInfo {
+            id: 1,
+            name: "COM1".to_string(),
+            port_type: "VirtualPairSideA".to_string(),
+            baud_rate: 115_200,
+            is_active: true,
+        }],
+        routes: vec![Route {
+            route_id: 100,
+            source_id: 1,
+            target_ids: vec![2],
+            bidirectional: false,
+            fault: Some(FaultConfig {
+                fixed_delay: Duration::from_millis(5),
+                ..FaultConfig::default()
+            }),
+        }],
+    };
+    write_message(&mut server, &resp).await.unwrap();
+    assert_eq!(
+        read_message::<_, Response>(&mut client).await.unwrap(),
+        resp
     );
 }
 

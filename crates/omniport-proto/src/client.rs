@@ -1,6 +1,7 @@
 use crate::codec::{read_message, write_message};
 use crate::error::{ProtoError, Result};
-use crate::types::{EndpointInfo, Request, Response, SerialConfigDto};
+use crate::types::{EndpointInfo, Request, Response, Route, SerialConfigDto};
+use omniport_core::fault::FaultConfig;
 use tokio::net::TcpStream;
 
 /// Control-plane client communicating with `omniportd`
@@ -44,6 +45,15 @@ impl RpcClient {
         }
     }
 
+    /// Fetches a consistent snapshot of all endpoints and canonical routes
+    pub async fn topology(&mut self) -> Result<(Vec<EndpointInfo>, Vec<Route>)> {
+        match self.request(Request::GetTopology).await? {
+            Response::Topology { endpoints, routes } => Ok((endpoints, routes)),
+            Response::Error { message, .. } => Err(ProtoError::ServerError(message)),
+            other => Err(ProtoError::UnexpectedResponse(format!("{:?}", other))),
+        }
+    }
+
     /// Creates a virtual serial port pair (e.g. COM10 <-> COM11 or /tmp/ttyV0 <-> /tmp/ttyV1)
     pub async fn create_virtual_pair(
         &mut self,
@@ -81,10 +91,23 @@ impl RpcClient {
         target_ids: Vec<u16>,
         bidirectional: bool,
     ) -> Result<u32> {
+        self.add_route_with_fault(source_id, target_ids, bidirectional, None)
+            .await
+    }
+
+    /// Adds a routing rule with optional fault injection in the router graph
+    pub async fn add_route_with_fault(
+        &mut self,
+        source_id: u16,
+        target_ids: Vec<u16>,
+        bidirectional: bool,
+        fault: Option<FaultConfig>,
+    ) -> Result<u32> {
         let req = Request::AddRoute {
             source_id,
             target_ids,
             bidirectional,
+            fault,
         };
         match self.request(req).await? {
             Response::RouteAdded {

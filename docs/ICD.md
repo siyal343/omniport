@@ -49,3 +49,51 @@
   `fixtures/generate_viewport_fixture.mjs`). Both the Rust encoder
   (`crates/omniport-capture/tests/viewport_contract.rs`) and the TypeScript decoder
   (`apps/omniport-desktop/src/ipc/viewportDecoder.contract.test.js`) MUST reproduce it.
+
+## 3. Daemon Control-Plane Wire Format (`omniportd` ↔ Clients)
+
+The control plane between `omniportd` and stateless clients (`omniport-cli`,
+`omniport-desktop`) is defined authoritatively in `crates/omniport-proto/src/types.rs`
+and `crates/omniport-proto/src/codec.rs` (the legacy `.proto` drafts were deleted to keep
+one schema owner).
+
+### 3.1 Transport and Framing
+- **Transport:** TCP stream (`127.0.0.1:50051` by default, configurable via `omniportd --bind`).
+- **Frame layout:** `[len: u32 big-endian][payload: UTF-8 JSON]`.
+- **Frame limit:** `MAX_FRAME_SIZE = 16 MiB` (`16 * 1024 * 1024` bytes), checked before
+  allocating the read buffer and before writing (`ProtoError::FrameTooLarge`).
+
+### 3.2 Canonical Messages (`Request` / `Response`)
+Requests and responses serialize with serde's externally-tagged enum JSON representation
+(unit variants as JSON strings, struct variants as single-key objects).
+
+| `Request` variant | Purpose | Primary `Response` variant |
+| :--- | :--- | :--- |
+| `"HealthCheck"` | Query status, uptime, and counts | `Health { status, uptime_secs, active_endpoints, active_routes }` |
+| `"ListEndpoints"` | Enumerate registered endpoints | `Endpoints(Vec<EndpointInfo>)` |
+| `"GetTopology"` | Fetch endpoints + canonical routes | `Topology { endpoints, routes }` |
+| `CreateVirtualPair { port_a, port_b, config }` | Provision virtual endpoint pair + default bidirectional route | `VirtualPairCreated { pair_id, port_a, port_b, success, message }` |
+| `RemoveEndpoint { id }` | Unregister endpoint and prune referencing routes | `Success { message }` |
+| `AddRoute { source_id, target_ids, bidirectional, fault? }` | Validate endpoints and install canonical `Route` | `RouteAdded { route_id, success, message }` |
+| `RemoveRoute { route_id }` | Delete route and reconcile `RoutingGraph` edges | `Success { message }` |
+| `ReadViewport { start_row, row_count }` | Fetch ICD §2 viewport batch | `ViewportBatch { bytes }` |
+| `"CaptureStatus"` | Query total and dropped frame counts | `CaptureStatus { total_packets, dropped_frames }` |
+| `"Shutdown"` | Initiate graceful daemon shutdown | `Success { message }` |
+
+- `fault` on `AddRoute` and `Route` is optional (`#[serde(default, skip_serializing_if = "Option::is_none")]`)
+  for wire compatibility with pre-fault callers.
+- `Response::ViewportBatch.bytes` travels as a standard RFC 4648 base64 string rather
+  than a JSON byte array, capped at `MAX_VIEWPORT_BATCH_BYTES = 8 MiB` raw (~10.7 MiB
+  base64, inside `MAX_FRAME_SIZE`). Requests exceeding the cap return `Error { code: 413, ... }`.
+
+### 3.3 Topology DTOs and Error Codes
+- **`EndpointInfo`:** `{ id: u16, name: String, port_type: String, baud_rate: u32, is_active: bool }`.
+- **`Route` (owned by `omniport_core::topology`):**
+  `{ route_id: u32, source_id: u16, target_ids: Vec<u16>, bidirectional: bool, fault?: FaultConfig }`.
+- **`Error { code: u32, message: String }` status codes:**
+  - `400` — validation error (empty endpoint name, empty `target_ids`, self-loop, duplicate target, invalid fault probability).
+  - `404` — unknown endpoint ID or route ID.
+  - `409` — endpoint ID conflict or conflicting non-equal `FaultConfig` on the same directed edge.
+  - `413` — ICD §2 viewport batch exceeds `MAX_VIEWPORT_BATCH_BYTES`.
+  - `503` — endpoint/pair/route ID space exhausted or `omniportd` is shutting down.
+  - `500` — internal routing invariant failure.

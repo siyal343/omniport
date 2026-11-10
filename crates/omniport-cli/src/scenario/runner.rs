@@ -5,6 +5,7 @@ use bytes::Bytes;
 use omniport_capture::pcapng::PcapngWriter;
 use omniport_core::fault::FaultConfig;
 use omniport_core::routing::{BackpressurePolicy, RoutingGraph};
+use omniport_core::topology::{Request as TopologyRequest, Topology};
 use omniport_core::{AsyncEndpoint, EndpointId, FrameFlags, PinState, SerialConfig, SerialEvent};
 use omniport_script::engine::ScriptConfig;
 use omniport_script::{ScriptEndpoint, ScriptEngine};
@@ -45,6 +46,7 @@ pub struct ScenarioReport {
 
 pub struct ScenarioRunner {
     config: ScenarioConfig,
+    topology: Topology,
     router: Arc<RoutingGraph>,
     pin_states: Arc<Mutex<HashMap<EndpointId, PinState>>>,
     pcapng_writer: Option<Arc<Mutex<PcapngWriter<File>>>>,
@@ -72,29 +74,31 @@ impl ScenarioRunner {
 
     /// Creates and initializes a new scenario runner with all endpoints and routes
     pub fn new(config: ScenarioConfig) -> Result<Self, ScenarioError> {
-        let router = Arc::new(RoutingGraph::new());
+        let mut topology = Topology::new();
         let pin_states = Arc::new(Mutex::new(HashMap::new()));
-        let mut bridge_tasks = Vec::new();
-        let mut cancel_txs = Vec::new();
+        let mut pending_scripts: Vec<(EndpointId, ScriptEndpoint)> = Vec::new();
 
-        // 1. Register endpoints
+        // 1. Register endpoints through the canonical Topology seam
         for ep in &config.endpoints {
-            if router.has_endpoint(ep.id) {
-                return Err(ScenarioError::ConfigError(format!(
-                    "Duplicate endpoint id {}",
-                    ep.id
-                )));
-            }
-            router
-                .register_endpoint(ep.id, 1024, BackpressurePolicy::DropNewest)
-                .map_err(ScenarioError::RoutingError)?;
+            let serial_cfg = SerialConfig {
+                baud_rate: ep.baud_rate,
+                ..Default::default()
+            };
+            topology.apply(TopologyRequest::RegisterEndpoint {
+                id: Some(ep.id),
+                name: ep.name.clone(),
+                port_type: endpoint_type_name(ep.endpoint_type).to_string(),
+                config: serial_cfg,
+                queue_capacity: 1024,
+                backpressure: BackpressurePolicy::DropNewest,
+            })?;
 
             pin_states
                 .lock()
                 .unwrap_or_else(|e| e.into_inner())
                 .insert(ep.id, PinState::empty());
 
-            // Instantiate endpoint-specific bridges
+            // Validate and build endpoint-specific workers before spawning any tasks
             match ep.endpoint_type {
                 EndpointType::Mock => {
                     // Mock endpoints are driven directly by the runner
@@ -107,10 +111,6 @@ impl ScenarioRunner {
                         ))
                     })?;
                     let fuel = ep.fuel_limit.unwrap_or(1_000_000);
-                    let serial_cfg = SerialConfig {
-                        baud_rate: ep.baud_rate,
-                        ..Default::default()
-                    };
 
                     let mut engine = ScriptEngine::new(ScriptConfig {
                         max_fuel: fuel,
@@ -128,11 +128,7 @@ impl ScenarioRunner {
                         .map_err(|e| ScenarioError::ScriptError(e.to_string()))?;
 
                     let script_ep = ScriptEndpoint::new(ep.id, &ep.name, serial_cfg, engine);
-
-                    let (cancel_tx, cancel_rx) = tokio::sync::oneshot::channel();
-                    cancel_txs.push(cancel_tx);
-                    let handle = spawn_endpoint_bridge(script_ep, ep.id, router.clone(), cancel_rx);
-                    bridge_tasks.push(handle);
+                    pending_scripts.push((ep.id, script_ep));
                 }
                 EndpointType::TcpServer | EndpointType::TcpClient | EndpointType::Udp => {
                     // Network endpoints can be wired when live network testing is configured
@@ -140,21 +136,15 @@ impl ScenarioRunner {
             }
         }
 
-        // 2. Configure routing graph and fault profiles
+        // 2. Configure routes and fault profiles through Topology
         for route in &config.routes {
             let fault = route.fault.as_ref().map(convert_fault_config).transpose()?;
-
-            for &target in &route.targets {
-                router
-                    .add_edge(route.source, target, fault.clone())
-                    .map_err(ScenarioError::RoutingError)?;
-
-                if route.bidirectional {
-                    router
-                        .add_edge(target, route.source, fault.clone())
-                        .map_err(ScenarioError::RoutingError)?;
-                }
-            }
+            topology.apply(TopologyRequest::AddRoute {
+                source_id: route.source,
+                target_ids: route.targets.clone(),
+                bidirectional: route.bidirectional,
+                fault,
+            })?;
         }
 
         // 3. Initialize PCAPNG capture if enabled
@@ -176,8 +166,24 @@ impl ScenarioRunner {
             None
         };
 
+        // 4. Spawn endpoint bridges only after all config/topology validation succeeds
+        let router = topology.graph();
+        let mut bridge_tasks = Vec::with_capacity(pending_scripts.len());
+        let mut cancel_txs = Vec::with_capacity(pending_scripts.len());
+        for (ep_id, script_ep) in pending_scripts {
+            let (cancel_tx, cancel_rx) = tokio::sync::oneshot::channel();
+            cancel_txs.push(cancel_tx);
+            bridge_tasks.push(spawn_endpoint_bridge(
+                script_ep,
+                ep_id,
+                Arc::clone(&router),
+                cancel_rx,
+            ));
+        }
+
         Ok(Self {
             config,
+            topology,
             router,
             pin_states,
             pcapng_writer,
@@ -565,7 +571,7 @@ impl ScenarioRunner {
     /// (the routing graph returned zero destinations), making a broken
     /// scenario report PASS.
     fn ensure_endpoint(&self, ep_id: EndpointId) -> Result<(), ScenarioError> {
-        if self.router.has_endpoint(ep_id) {
+        if self.topology.has_endpoint(ep_id) {
             Ok(())
         } else {
             Err(ScenarioError::ConfigError(format!(
@@ -582,6 +588,16 @@ impl ScenarioRunner {
     fn set_pins(&self, ep_id: EndpointId, pins: PinState) {
         let mut guard = self.pin_states.lock().unwrap_or_else(|e| e.into_inner());
         guard.insert(ep_id, pins);
+    }
+}
+
+fn endpoint_type_name(kind: EndpointType) -> &'static str {
+    match kind {
+        EndpointType::Mock => "mock",
+        EndpointType::Script => "script",
+        EndpointType::TcpServer => "tcp_server",
+        EndpointType::TcpClient => "tcp_client",
+        EndpointType::Udp => "udp",
     }
 }
 

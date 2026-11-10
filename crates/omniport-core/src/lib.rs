@@ -3,11 +3,13 @@ pub mod fault;
 pub mod framing;
 pub mod routing;
 pub mod throttler;
+pub mod topology;
 
 pub use throttler::{TokenBucketThrottler, calculate_byte_rate};
 
 use bitflags::bitflags;
 use bytes::Bytes;
+use serde::{Deserialize, Serialize};
 use std::future::Future;
 use std::pin::Pin;
 
@@ -48,7 +50,7 @@ pub struct SerialEvent {
     pub payload: Bytes,
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub struct SerialConfig {
     pub baud_rate: u32,
     pub data_bits: u8,

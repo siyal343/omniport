@@ -1,8 +1,6 @@
-//! Length-delimited JSON framing used on the daemon control plane.
+//! Length-delimited JSON framing used on the daemon control plane (see `docs/ICD.md` §3).
 //!
-//! Wire format: `[len: u32 big-endian][serde_json bytes]`. This is deliberately
-//! *not* gRPC/Protobuf: the `.proto` files in the repository are design-only and
-//! no code generation is wired up (see the crate-level docs).
+//! Wire format: `[len: u32 big-endian][serde_json bytes]`.
 
 use crate::error::{ProtoError, Result};
 use serde::Serialize;

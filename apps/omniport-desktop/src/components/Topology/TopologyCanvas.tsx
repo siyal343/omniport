@@ -23,7 +23,13 @@ import { MergerNode } from "./nodes/MergerNode.tsx";
 import { FaultNode } from "./nodes/FaultNode.tsx";
 import { AnimatedRouteEdge } from "./edges/AnimatedRouteEdge.tsx";
 import type { OmniPortNode, OmniPortEdge } from "./topologyTypes.ts";
-import { initialNodes, initialEdges, createVirtualPairNode, createFaultNode } from "./topologyData.ts";
+import {
+  initialNodes,
+  initialEdges,
+  createVirtualPairNode,
+  createFaultNode,
+  createRouteEdgeForConnection,
+} from "./topologyData.ts";
 import { type MonitorTheme, darkTheme, lightTheme } from "../../utils/theme.ts";
 
 const nodeTypes: NodeTypes = {
@@ -111,19 +117,13 @@ export const TopologyCanvas: React.FC<TopologyCanvasProps> = ({
 
   const onConnect = useCallback(
     (connection: Connection) => {
+      const routeEdge = createRouteEdgeForConnection(connection, nodes);
+      if (!routeEdge) return;
       setEdges((eds) =>
         addEdge(
           {
             ...connection,
-            type: "animated",
-            data: {
-              sourceEndpointId: 1,
-              targetEndpointId: 2,
-              packetRate: 0,
-              bandwidthBps: 0,
-              hasErrors: false,
-              active: true,
-            },
+            ...routeEdge,
           },
           eds
         )
@@ -132,7 +132,7 @@ export const TopologyCanvas: React.FC<TopologyCanvasProps> = ({
         onRouteCreated?.(connection.source, connection.target);
       }
     },
-    [setEdges, onRouteCreated]
+    [nodes, setEdges, onRouteCreated]
   );
 
   const addVirtualPair = useCallback(() => {
