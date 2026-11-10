@@ -6,6 +6,6 @@ description: "Load OmniPort SRS, ADRs, ICD binary wire protocols, and algorithms
 # OmniPort Engineering Specifications Reference
 Review these specifications whenever implementing requirements, IPC wire protocols, or OS backends:
 
-@[SRS](../../docs/SRS.md)
-@[ADR](../../docs/ADR.md)
-@[ICD](../../docs/ICD.md)
+@[SRS](../../internal_docs/SRS.md)
+@[ADR](../../internal_docs/ADR.md)
+@[ICD](../../internal_docs/ICD.md)

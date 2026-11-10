@@ -8,3 +8,4 @@ dist/
 *.proptest-regressions
 .DS_Store
 apps/omniport-desktop/src-tauri/gen/schemas/
+/gui-test-screenshots/
