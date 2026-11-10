@@ -16,10 +16,20 @@ Tauri v2, and React 19.
 4. **Tiered OS Backends:** Use POSIX PTY + token-bucket baud throttling (and Linux CUSE for
    modem pins) in `omniport-hal-posix`, and `com0com` / UMDF2 in `omniport-hal-windows`.
 
-## Workspace Commands
-- Check core workspace: `cargo check --workspace`
-- Run unit & property tests: `cargo test --workspace`
-- Run clippy lints: `cargo clippy --workspace -- -D warnings`
+## Verification Policy (GitHub Actions First)
+- **Offload full-workspace verification to GitHub Actions:** Do NOT run full-workspace
+  sweeps locally (`cargo check --workspace`, `cargo clippy --workspace`,
+  `cargo test --workspace`, or full `apps/omniport-desktop` build/test matrices) when
+  GitHub Actions CI is available, unless the user explicitly asks or a local run is
+  required to reproduce a failing CI job.
+- **Keep local checks crate-scoped:** During implementation, verify only touched crates
+  and files locally (`cargo fmt --all`, `cargo check -p <crate>`,
+  `cargo clippy -p <crate> --all-targets --locked -- -D warnings`,
+  `cargo test -p <crate> --locked`, or targeted frontend tests via `npx vitest run <file>`).
+- **CI Workflow & Monitoring:** `.github/workflows/ci.yml` executes the full Rust
+  workspace (`windows-latest`), Tauri host (`apps/omniport-desktop/src-tauri`), and
+  frontend checks automatically on `push` / `pull_request`. Monitor runs with
+  `gh run watch` and inspect errors with `gh run view --log-failed`.
 
 ## Step-by-Step Execution Protocol
 Always check `@[Progress Tracker](docs/PROGRESS.md)` before starting a new task.

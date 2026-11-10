@@ -12,10 +12,10 @@ Advance the OmniPort build by executing exactly ONE step from `docs/PROGRESS.md`
 3. **Formulate Implementation Plan:** Present a concise, file-by-file plan for the step (traits, structs, algorithms, and unit tests to add).
 4. **Implement & Verify:**
    - Write the implementation code and unit/property tests.
-   - Run `cargo test --workspace` and `cargo clippy --workspace -- -D warnings`.
-   - Fix any compiler warnings or test failures before proceeding.
-5. **Update Progress:** Mark the completed step `[x]` in `docs/PROGRESS.md` and summarize the verification results.
+   - Locally, run only formatting (`cargo fmt --all`) and crate-scoped checks for touched crates (`cargo clippy -p <crate> --all-targets --locked -- -D warnings`, `cargo test -p <crate> --locked`); do NOT run full `--workspace` sweeps locally when GitHub Actions CI is available unless reproducing a CI failure or asked by the user.
+   - Run the full workspace verification suite on GitHub Actions (`.github/workflows/ci.yml` on `push` / `pull_request`, watched via `gh run watch`) and fix any compiler warnings or test failures before marking completion.
+5. **Update Progress:** Mark the completed step `[x]` in `docs/PROGRESS.md` and summarize the verification results (including GitHub Actions run status when pushed).
 
 # Constraints
-- Do NOT jump ahead to future steps until `cargo test --workspace` passes for the current step.
+- Do NOT jump ahead to future steps until targeted local checks and the full verification gate (via GitHub Actions when pushed, or local when offline/requested) pass for the current step.
 - Do NOT introduce blocking I/O inside `tokio` async tasks.
